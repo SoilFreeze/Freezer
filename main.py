@@ -384,58 +384,97 @@ elif selected_project != "All Projects":
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
-        # 1. Extract available Systems (Phase is already handled by the sidebar active project)
-        available_systems = sorted(
-            [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
-            key=natural_sort_key
-        )
+        # 1. DEFINE THE TABS HERE
+        tab1, tab2 = st.tabs(["Telemetry Charts", "Site As-Builts"])
         
-        selected_systems = []
-        
-        # 2. THE FIX: Only show the filter if there are actually multiple systems to choose from!
-        if len(available_systems) > 1:
-            selected_systems = st.multiselect(
-                "⚙️ Filter by System (Leave blank to show all systems):", 
-                options=available_systems, 
-                default=[]  # Defaulting to blank safely passes all data through
+        # ---------------------------------------------------------
+        # TAB 1: ALL YOUR EXISTING CHART LOGIC GOES HERE (Indented)
+        # ---------------------------------------------------------
+        with tab1:
+            # Extract available Systems
+            available_systems = sorted(
+                [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
+                key=natural_sort_key
             )
             
-        # 3. Slice the data ONLY if the user explicitly picked a system
-        display_data = clean_data.copy()
-        if selected_systems:
-            display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
+            selected_systems = []
             
-        st.divider()
+            # Only show the filter if there are multiple systems
+            if len(available_systems) > 1:
+                selected_systems = st.multiselect(
+                    "⚙️ Filter by System (Leave blank to show all systems):", 
+                    options=available_systems, 
+                    default=[]  
+                )
+                
+            # Slice the data ONLY if the user explicitly picked a system
+            display_data = clean_data.copy()
+            if selected_systems:
+                display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
+                
+            st.divider()
 
-        # 4. Grab only the valid locations
-        unique_locations = display_data['Location'].dropna().unique()
-        valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
-        sorted_locations = sorted(valid_locations, key=natural_sort_key)
+            # Grab only the valid locations
+            unique_locations = display_data['Location'].dropna().unique()
+            valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
+            sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
-        # 5. Automatically loop through those specific locations
-        for loc in sorted_locations:
-            loc_data = display_data[display_data['Location'] == loc]
+            # Automatically loop through those specific locations
+            for loc in sorted_locations:
+                loc_data = display_data[display_data['Location'] == loc]
+                
+                if loc_data.empty:
+                    continue
+
+                fig = build_high_speed_graph(
+                    client=sidebar_client,  
+                    df=loc_data, 
+                    title=f"Thermal Trends: {loc}",
+                    start_view=start_date, 
+                    end_view=end_date, 
+                    active_refs=active_refs,
+                    unit_mode=unit_mode,
+                    unit_label=unit_label,
+                    display_tz=display_tz,
+                    f_start_date=freeze_start_ts, 
+                    curve_id=selected_project
+                )
+                
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.markdown("---")
+
+        # ---------------------------------------------------------
+        # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
+        # ---------------------------------------------------------
+        with tab2:
+            st.subheader(f"Site As-Builts: {selected_project}")
             
-            if loc_data.empty:
-                continue
-
-            fig = build_high_speed_graph(
-                client=sidebar_client,  
-                df=loc_data, 
-                title=f"Thermal Trends: {loc}",
-                start_view=start_date, 
-                end_view=end_date, 
-                active_refs=active_refs,
-                unit_mode=unit_mode,
-                unit_label=unit_label,
-                display_tz=display_tz,
-                f_start_date=freeze_start_ts, 
-                curve_id=selected_project
-            )
+            # 1. Extract just the job number (e.g., gets "2527" from "2527-Elizabeth")
+            job_num = selected_project.split('-')[0].strip()
+            as_builts_dir = "as_builts"
             
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-                st.markdown("---")
+            # 2. Check if the folder exists first
+            if not os.path.exists(as_builts_dir):
+                st.warning(f"Please create an `{as_builts_dir}` folder in your main directory.")
+            else:
+                # 3. Scan the folder for any images starting with the job number
+                found_images = []
+                for file_name in os.listdir(as_builts_dir):
+                    # Check if it starts with the job number AND is an image
+                    if file_name.startswith(job_num) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        found_images.append(os.path.join(as_builts_dir, file_name))
+                
+                # 4. Sort the files so they appear in order (using your existing natural_sort_key function!)
+                found_images = sorted(found_images, key=natural_sort_key)
+                
+                # 5. Display the images or a fallback message
+                if found_images:
+                    for img_path in found_images:
+                        st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
+                        st.markdown("---") # Adds a nice line between multiple images
+                else:
+                    st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
 
     elif page == "Depth Charts":
         render_depth_charts(selected_project, unit_label, display_tz)
