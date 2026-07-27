@@ -1029,13 +1029,13 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         AS_BUILT_DIR = "as_builts" 
         
         with col_map2:
-            # 1. Scan the folder for images
+            # 1. Scan the folder for images (Removed .pdf, PIL can only read images)
             available_images = []
             if os.path.exists(AS_BUILT_DIR):
-                available_images = sorted([f for f in os.listdir(AS_BUILT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.pdf'))])
+                available_images = sorted([f for f in os.listdir(AS_BUILT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
             
             if not available_images:
-                st.error(f"No images found in the '{AS_BUILT_DIR}' folder.")
+                st.error(f"No image files found in the '{AS_BUILT_DIR}' folder.")
                 selected_image = "(None)"
             else:
                 selected_image = st.selectbox("Select As-Built Image:", ["(None)"] + available_images)
@@ -1051,11 +1051,11 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     
                     if st.button("Clear All Data", use_container_width=True):
                         st.session_state.mapped_pipes = pd.DataFrame(columns=['NodeNum', 'Map_X', 'Map_Y'])
+                        st.session_state.pop('last_click', None) # Clear click history too
                         st.rerun()
 
         with col_map1:
             if selected_image != "(None)":
-                # 2. Build the full path to the image and open it
                 img_path = os.path.join(AS_BUILT_DIR, selected_image)
                 
                 try:
@@ -1066,19 +1066,24 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     else:
                         st.warning("⚠️ Enter a Pipe Name on the right before clicking!")
                         
-                    # Render the interactive image
                     click_data = streamlit_image_coordinates(img, key="site_map")
                     
-                    # Process the click
+                    # 2. Prevent the infinite rerun loop by checking if this is a NEW click
                     if click_data is not None and pipe_name:
-                        x_coord, y_coord = click_data['x'], click_data['y']
+                        click_hash = f"{click_data['x']}-{click_data['y']}"
                         
-                        if pipe_name in st.session_state.mapped_pipes['NodeNum'].values:
-                            st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['NodeNum'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
-                        else:
-                            new_row = pd.DataFrame({'NodeNum': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
-                            st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
-                        
-                        st.rerun()
+                        if st.session_state.get('last_click') != click_hash:
+                            st.session_state['last_click'] = click_hash # Remember this click
+                            
+                            x_coord, y_coord = click_data['x'], click_data['y']
+                            
+                            if pipe_name in st.session_state.mapped_pipes['NodeNum'].values:
+                                st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['NodeNum'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
+                            else:
+                                new_row = pd.DataFrame({'NodeNum': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
+                                st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
+                            
+                            st.rerun()
+                            
                 except Exception as e:
                     st.error(f"Could not load image {selected_image}. Error: {e}")
