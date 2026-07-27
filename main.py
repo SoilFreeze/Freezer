@@ -3,6 +3,8 @@ import pandas as pd
 import time
 import os
 import re
+import sys.
+import time
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
