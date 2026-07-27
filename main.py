@@ -42,16 +42,15 @@ page = st.sidebar.selectbox(
 )
 
 # ---------------------------------------------------------
-# 2. PROJECT SELECTION (Exact Original Code)
+# 2. PROJECT SELECTION (Forced Render)
 # ---------------------------------------------------------
-selected_project = "All Projects"
-project_metadata = None  
-
 sidebar_client = get_bq_client()
+proj_list = []
+proj_df = pd.DataFrame()
 
 if sidebar_client is not None:
     try:
-        # Determine the filter based on the toggle (Original)
+        # Original filter logic
         status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
 
         proj_q = f"""
@@ -68,36 +67,33 @@ if sidebar_client is not None:
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # Python fix: Strip whitespace and filter out non-values (Original)
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
         ])
         
-        selected_project = st.sidebar.selectbox(
-            "🎯 Active Project", 
-            ["All Projects"] + proj_list, 
-            key="sidebar_proj_picker_global"
-        )
-        
-        # Diagnostic warning if the DB query returned nothing
-        if proj_df.empty:
-            st.sidebar.error("⚠️ Database returned 0 projects. Check BigQuery.")
-        
-        st.session_state['selected_project'] = selected_project
-        
-        if selected_project != "All Projects":
-            meta_row = proj_df[proj_df['Project'] == selected_project]
-            if not meta_row.empty:
-                project_metadata = meta_row.iloc[0].to_dict()
-                st.session_state['project_metadata'] = project_metadata
-        else:
-            st.session_state['project_metadata'] = None
-            
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-        # Fallback render if query fails completely
-        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="sidebar_proj_picker_fallback")
+else:
+    # If the client is None, we warn you so you know why it's empty
+    st.sidebar.warning("Database offline: Check credentials or connection.")
+
+# 👇 THIS GUARANTEES THE DROPDOWN ALWAYS RENDERS 👇
+selected_project = st.sidebar.selectbox(
+    "🎯 Active Project", 
+    ["All Projects"] + proj_list, 
+    key="sidebar_proj_picker_global"
+)
+
+st.session_state['selected_project'] = selected_project
+
+project_metadata = None
+if selected_project != "All Projects" and not proj_df.empty:
+    meta_row = proj_df[proj_df['Project'] == selected_project]
+    if not meta_row.empty:
+        project_metadata = meta_row.iloc[0].to_dict()
+
+st.session_state['project_metadata'] = project_metadata
 
 
 # ---------------------------------------------------------
@@ -116,19 +112,16 @@ if st.sidebar.button("🔄 Refresh Data", width="stretch"):
 # ---------------------------------------------------------
 st.sidebar.header("👁️ Visibility Controls")
 
-# 1. Archived Projects Toggle
 st.session_state['global_show_archived'] = st.sidebar.checkbox(
     "Show Archived Projects", 
     value=st.session_state.get('global_show_archived', False)
 )
 
-# 2. Ambient Temp Toggle
 st.session_state['global_show_ambient'] = st.sidebar.checkbox(
     "Show Ambient Temp", 
     value=st.session_state.get('global_show_ambient', True)
 )
 
-# 3. Theoretical Curve (Auto-toggles based on Project Status)
 p_meta = st.session_state.get('project_metadata')
 p_status = ""
 try:
@@ -147,7 +140,6 @@ st.session_state['global_show_ref'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_ref', default_curve)
 )
 
-# 4 & 5. Independent Data Auditing Controls
 st.session_state['global_show_masked'] = st.sidebar.checkbox(
     "Show Masked Data", 
     value=st.session_state.get('global_show_masked', False)
