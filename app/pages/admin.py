@@ -1077,29 +1077,43 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 img_path = os.path.join(AS_BUILT_DIR, selected_image)
                 
                 try:
-                    img = Image.open(img_path)
+                    # 1. Open the massive original image
+                    raw_img = Image.open(img_path)
+                    orig_width, orig_height = raw_img.size
+                    
+                    # 2. Calculate a scale factor to shrink it to fit the screen (~900px wide)
+                    MAX_DISPLAY_WIDTH = 900
+                    scale_factor = 1.0
+                    
+                    if orig_width > MAX_DISPLAY_WIDTH:
+                        scale_factor = orig_width / MAX_DISPLAY_WIDTH
+                        new_height = int(orig_height / scale_factor)
+                        display_img = raw_img.resize((MAX_DISPLAY_WIDTH, new_height))
+                    else:
+                        display_img = raw_img
                     
                     if pipe_name:
                         st.info(f"👆 Click on the map to log coordinates for **{pipe_name}**.")
                     else:
                         st.warning("⚠️ Enter a Location on the right before clicking!")
                         
-                    click_data = streamlit_image_coordinates(img, key="site_map")
+                    # 3. Render the SHRUNKEN image on the screen
+                    click_data = streamlit_image_coordinates(display_img, key="site_map")
                     
-                    # Prevent the infinite rerun loop
                     if click_data is not None and pipe_name:
                         click_hash = f"{click_data['x']}-{click_data['y']}"
                         
                         if st.session_state.get('last_click') != click_hash:
                             st.session_state['last_click'] = click_hash 
                             
-                            x_coord, y_coord = click_data['x'], click_data['y']
+                            # 4. Math Magic: Multiply the click by the scale factor to get the TRUE original coordinates!
+                            true_x = int(click_data['x'] * scale_factor)
+                            true_y = int(click_data['y'] * scale_factor)
                             
-                            # Save to the Location column
                             if pipe_name in st.session_state.mapped_pipes['Location'].values:
-                                st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['Location'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
+                                st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['Location'] == pipe_name, ['Map_X', 'Map_Y']] = [true_x, true_y]
                             else:
-                                new_row = pd.DataFrame({'Location': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
+                                new_row = pd.DataFrame({'Location': [pipe_name], 'Map_X': [true_x], 'Map_Y': [true_y]})
                                 st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
                             
                             st.rerun()
