@@ -344,7 +344,27 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
     )
-    fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")                           
+    fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")        
+
+    # ---------------------------------------------------------
+    # GROUND ELEVATION LEGEND NOTE
+    # ---------------------------------------------------------
+    if 'BaseElevation' in plot_df.columns:
+        valid_elevs = plot_df['BaseElevation'].dropna()
+        if not valid_elevs.empty:
+            ground_elev_val = valid_elevs.iloc[0]
+            
+            # Add an invisible trace just to display the text in the legend
+            fig.add_trace(go.Scatter(
+                x=[None], 
+                y=[None],
+                mode='markers',
+                marker=dict(color='rgba(0,0,0,0)'),  # Fully transparent
+                name=f"🌍 <b>Ground Elev: {float(ground_elev_val):.1f} ft</b>",
+                showlegend=True,
+                hoverinfo='none'
+            ))
+                               
     return fig
                                
 def get_soil_reference_curves(soil_type, start_date, unit_mode):
