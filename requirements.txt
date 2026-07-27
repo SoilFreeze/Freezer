@@ -18,4 +18,4 @@ pyarrow
 db-dtypes
 matplotlib
 streamlit-image-coordinates
-PIL
+Pillow
