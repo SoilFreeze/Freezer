@@ -3,8 +3,6 @@ import pandas as pd
 import time
 import os
 import re
-import sys.
-import time
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
@@ -23,7 +21,7 @@ from app.pages.admin import render_admin_page
 # 1. UI SETUP
 st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
 
-# 2. SIDEBAR TITLE
+# 2. SIDEBAR NAVIGATION
 st.sidebar.title("❄️ SoilFreeze Lab")
 
 # ---------------------------------------------------------
@@ -44,58 +42,61 @@ page = st.sidebar.selectbox(
 )
 
 # ---------------------------------------------------------
-# 2. PROJECT SELECTION (Forced Render)
+# 2. PROJECT SELECTION (Using original setup, patched for missing projects)
 # ---------------------------------------------------------
+selected_project = "All Projects"
+project_metadata = None  
+
 sidebar_client = get_bq_client()
-proj_list = []
-proj_df = pd.DataFrame()
 
 if sidebar_client is not None:
     try:
-        # Original filter logic
-        status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
-
+        # We fetch all projects and the active status to avoid BigQuery casting errors hiding your list
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
                 ProjectName, 
                 Timezone, 
                 ProjectStatus, 
-                Date_Freezedown
+                Date_Freezedown,
+                CAST(ShowActive AS STRING) as ShowActive_Str
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
-              {status_filter}
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
+        # Original logic applied via Python to guarantee the dropdown isn't empty
+        if not st.session_state.get('global_show_archived', False):
+            valid_flags = ['TRUE', 'YES', '1', 'T']
+            proj_df = proj_df[proj_df['ShowActive_Str'].fillna('').str.upper().str.strip().isin(valid_flags)]
+        
+        # Python fix from your original: Strip whitespace and filter out non-values
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
         ])
         
+        selected_project = st.sidebar.selectbox(
+            "🎯 Active Project", 
+            ["All Projects"] + proj_list, 
+            key="sidebar_proj_picker_global"
+        )
+        
+        st.session_state['selected_project'] = selected_project
+        
+        if selected_project != "All Projects":
+            meta_row = proj_df[proj_df['Project'] == selected_project]
+            if not meta_row.empty:
+                project_metadata = meta_row.iloc[0].to_dict()
+                st.session_state['project_metadata'] = project_metadata
+        else:
+            st.session_state['project_metadata'] = None
+            
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-else:
-    # If the client is None, we warn you so you know why it's empty
-    st.sidebar.warning("Database offline: Check credentials or connection.")
-
-# 👇 THIS GUARANTEES THE DROPDOWN ALWAYS RENDERS 👇
-selected_project = st.sidebar.selectbox(
-    "🎯 Active Project", 
-    ["All Projects"] + proj_list, 
-    key="sidebar_proj_picker_global"
-)
-
-st.session_state['selected_project'] = selected_project
-
-project_metadata = None
-if selected_project != "All Projects" and not proj_df.empty:
-    meta_row = proj_df[proj_df['Project'] == selected_project]
-    if not meta_row.empty:
-        project_metadata = meta_row.iloc[0].to_dict()
-
-st.session_state['project_metadata'] = project_metadata
+        # Added a fallback so the box doesn't vanish on an error
+        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="sidebar_proj_picker_fallback")
 
 
 # ---------------------------------------------------------
@@ -114,16 +115,19 @@ if st.sidebar.button("🔄 Refresh Data", width="stretch"):
 # ---------------------------------------------------------
 st.sidebar.header("👁️ Visibility Controls")
 
+# 1. Archived Projects Toggle
 st.session_state['global_show_archived'] = st.sidebar.checkbox(
     "Show Archived Projects", 
     value=st.session_state.get('global_show_archived', False)
 )
 
+# 2. Ambient Temp Toggle
 st.session_state['global_show_ambient'] = st.sidebar.checkbox(
     "Show Ambient Temp", 
     value=st.session_state.get('global_show_ambient', True)
 )
 
+# 3. Theoretical Curve (Auto-toggles based on Project Status)
 p_meta = st.session_state.get('project_metadata')
 p_status = ""
 try:
@@ -142,6 +146,7 @@ st.session_state['global_show_ref'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_ref', default_curve)
 )
 
+# 4 & 5. Independent Data Auditing Controls
 st.session_state['global_show_masked'] = st.sidebar.checkbox(
     "Show Masked Data", 
     value=st.session_state.get('global_show_masked', False)
@@ -345,6 +350,7 @@ if page in GLOBAL_PAGES:
             elif page == "Admin Tools":
                 render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
         else:
+            st.divider()
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
                 st.subheader("🔐 Restricted Admin Access")
