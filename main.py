@@ -9,6 +9,7 @@ from app.components.charts import build_high_speed_graph
 
 # =============================================================================
 # IMPORTANT: Import your other page functions here based on your file structure
+# Example paths provided below, adjust as needed!
 # =============================================================================
 from app.pages.summary import render_summary_dashboard
 from app.pages.depth import render_depth_charts
@@ -24,9 +25,7 @@ st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout=
 # 2. SIDEBAR NAVIGATION
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# ---------------------------------------------------------
-# 1. NAVIGATION
-# ---------------------------------------------------------
+# PAGE NAVIGATION
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -49,9 +48,8 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # SAFE STATE CHECK: Using .get() prevents the AttributeError on first load
-        show_archived = st.session_state.get('global_show_archived', False)
-        status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1', 'T')"
+        # Determine the filter based on the toggle
+        status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
 
         proj_q = f"""
             SELECT 
@@ -92,9 +90,7 @@ if sidebar_client is not None:
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
 
-# ---------------------------------------------------------
-# 3. INTERACTIVE REFRESH TRIGGER
-# ---------------------------------------------------------
+# INTERACTIVE REFRESH TRIGGER
 if st.sidebar.button("🔄 Refresh Data", width="stretch"):
     with st.sidebar.spinner("Purging cache maps..."):
         st.cache_data.clear()
@@ -102,10 +98,6 @@ if st.sidebar.button("🔄 Refresh Data", width="stretch"):
         time.sleep(0.5)
         st.rerun()
 
-
-# ---------------------------------------------------------
-# 4. VISIBILITY CONTROLS
-# ---------------------------------------------------------
 st.sidebar.header("👁️ Visibility Controls")
 
 # 1. Archived Projects Toggle
@@ -120,9 +112,11 @@ st.session_state['global_show_ambient'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_ambient', True)
 )
 
-# 3. Theoretical Curve (Auto-toggles based on Project Status)
+# 3. Theoretical Curve (Auto-toggles based on Project Status!)
 p_meta = st.session_state.get('project_metadata')
 p_status = ""
+
+# Safely extract the status whether p_meta is a dict, Pandas Series, or None
 try:
     if p_meta is not None:
         if hasattr(p_meta, 'get'):
@@ -132,6 +126,7 @@ try:
 except Exception:
     p_status = ""
 
+# Default to False if in maintenance, True otherwise (Freezedown)
 default_curve = False if 'maintenance' in p_status else True 
 
 st.session_state['global_show_ref'] = st.sidebar.checkbox(
@@ -150,10 +145,9 @@ st.session_state['global_show_baddata'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_baddata', False)
 )
 
-
-# ---------------------------------------------------------
-# 5. CURRENT DATA AGES
-# ---------------------------------------------------------
+# =============================================================================
+# CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
+# =============================================================================
 st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
@@ -205,24 +199,24 @@ if sidebar_client is not None:
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
-
-# ---------------------------------------------------------
-# 6. TIMELINE NAVIGATION
-# ---------------------------------------------------------
 st.sidebar.subheader("⏳ Timeline Navigation")
 
+# 1. Put the checkbox in the sidebar
 show_full_dataset = st.sidebar.checkbox("🌍 See Full Data (Since Freezedown)", value=False, key="full_data_toggle")
 
 if show_full_dataset:
+    # 2. Dynamically calculate days since Date_Freezedown
     p_meta = st.session_state.get('project_metadata') or {}
     real_f_date = p_meta.get('Date_Freezedown')
     parsed_date = pd.to_datetime(real_f_date, errors='coerce')
     
     if pd.notnull(parsed_date):
+        # Strip timezone if present so we can compare to today
         if parsed_date.tzinfo is not None:
             parsed_date = parsed_date.tz_localize(None)
             
         days_since = (pd.Timestamp.now() - parsed_date).days
+        # Ensure we always pull at least 7 days, and add a 2-day buffer to cover today/tomorrow
         lookback = max(7, days_since + 2) 
         
         st.sidebar.caption(f"Showing ~{lookback} days of data since freezedown.")
@@ -231,6 +225,7 @@ if show_full_dataset:
         st.sidebar.caption("No freezedown date set for this project. Defaulting to 90 days.")
         st.session_state["global_lookback_days"] = 90
 else:
+    # 3. Standard slider for custom windows
     selected_weeks = st.sidebar.slider(
         "Select History Window (Weeks)",
         min_value=1,
@@ -263,10 +258,7 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
-
-# ---------------------------------------------------------
-# 7. UNITS
-# ---------------------------------------------------------
+# 4. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
     "Temperature Scale", 
@@ -278,10 +270,7 @@ unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
-
-# ---------------------------------------------------------
-# 8. DISPLAY & TIME
-# ---------------------------------------------------------
+# 5. TIMEZONE & DISPLAY
 st.sidebar.subheader("📱 Display & Time")
 
 default_tz_index = 2 
@@ -303,10 +292,7 @@ tz_mode = st.sidebar.selectbox(
 
 st.session_state["display_tz"] = tz_lookup[tz_mode]
 
-
-# ---------------------------------------------------------
-# 9. REFERENCE LINES
-# ---------------------------------------------------------
+# 6. REFERENCE LINES (Static Constants)
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
@@ -321,18 +307,21 @@ st.session_state["active_refs"] = tuple(active_refs)
 
 display_tz = st.session_state.get("display_tz", "UTC")
 
-
 # =============================================================================
 # MASTER LAYOUT FRAMEWORK PAGE ROUTER
 # =============================================================================
 
+# Define a sorting helper to ensure proper numerical sequencing (T1, T2, T3... instead of T1, T10, T2)
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
 
+# 1. DEFINE GLOBAL PAGES
 GLOBAL_PAGES = ["Summary", "Data Processing", "Admin Tools"]
 
+# 2. RENDER GLOBAL PAGES (Load regardless of project selection)
 if page in GLOBAL_PAGES:
     if page == "Summary":
+        # Pass None as selected_project if it's "All Projects"
         project_arg = None if selected_project == "All Projects" else selected_project
         render_summary_dashboard(project_arg, unit_label, unit_mode, display_tz)
         
@@ -343,37 +332,43 @@ if page in GLOBAL_PAGES:
             elif page == "Admin Tools":
                 render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
         else:
-            st.divider()
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
                 st.subheader("🔐 Restricted Admin Access")
                 pwd = st.text_input("Enter Admin Password", type="password", key="admin_password_input_field")
                 if st.button("Unlock Dashboard", width="stretch"):
+                    # THE FIX: Updated the fallback password to exactly "freeze123"
                     if pwd == st.secrets.get("admin_password", "freeze123"):
                         st.session_state['authenticated'] = True
                         st.rerun()
                     else:
                         st.error("Invalid Password. Access Denied.")
 
+# 3. RENDER PROJECT-SPECIFIC PAGES (Only load if a project is selected)
 elif selected_project != "All Projects":
+    # Calculate dates once for project pages
     lookback_days = st.session_state.get("global_lookback_days", 35)
-    end_date = pd.Timestamp.now()  
+    end_date = pd.Timestamp.now()  # Kept timezone-naive
     start_date = end_date - pd.Timedelta(days=lookback_days)
     
+    # --- FIX: Safely parse Date_Freezedown to match timezone-naive format ---
     freeze_start_ts = start_date 
     p_meta = st.session_state.get('project_metadata') or {}
     real_f_date = p_meta.get('Date_Freezedown')
     
     parsed_date = pd.to_datetime(real_f_date, errors='coerce')
     if pd.notnull(parsed_date):
+        # If the database returns it with a timezone, strip it so it matches start_date/end_date
         if parsed_date.tzinfo is not None:
             freeze_start_ts = parsed_date.tz_localize(None)
         else:
             freeze_start_ts = parsed_date
             
+    # Fetch and process the data for the selected project
+    # Pass the checkbox states dynamically so the Cache correctly refreshes!
     raw_data = get_universal_portal_data(
         selected_project, 
-        lookback_days=lookback_days, 
+        lookback_days=lookback_days,  # <--- THE FIX: Passing the days to BigQuery!
         is_summary_page=False,
         show_masked=st.session_state.get('global_show_masked', False),
         show_baddata=st.session_state.get('global_show_baddata', False)
@@ -383,9 +378,14 @@ elif selected_project != "All Projects":
     if page == "Time vs Temp":
         st.write("### 📈 Time vs Temperature Tracking")
         
+        # 1. DEFINE THE TABS HERE
         tab1, tab2 = st.tabs(["Telemetry Charts", "Site As-Builts"])
         
+        # ---------------------------------------------------------
+        # TAB 1: ALL YOUR EXISTING CHART LOGIC GOES HERE (Indented)
+        # ---------------------------------------------------------
         with tab1:
+            # Extract available Systems
             available_systems = sorted(
                 [str(s) for s in clean_data['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
                 key=natural_sort_key
@@ -393,6 +393,7 @@ elif selected_project != "All Projects":
             
             selected_systems = []
             
+            # Only show the filter if there are multiple systems
             if len(available_systems) > 1:
                 selected_systems = st.multiselect(
                     "⚙️ Filter by System (Leave blank to show all systems):", 
@@ -400,14 +401,19 @@ elif selected_project != "All Projects":
                     default=[]  
                 )
                 
+            # Slice the data ONLY if the user explicitly picked a system
             display_data = clean_data.copy()
             if selected_systems:
                 display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
+                
+            st.divider()
 
+            # Grab only the valid locations
             unique_locations = display_data['Location'].dropna().unique()
             valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
             sorted_locations = sorted(valid_locations, key=natural_sort_key)
 
+            # Automatically loop through those specific locations
             for loc in sorted_locations:
                 loc_data = display_data[display_data['Location'] == loc]
                 
@@ -432,26 +438,35 @@ elif selected_project != "All Projects":
                     st.plotly_chart(fig, use_container_width=True)
                     st.markdown("---")
 
+        # ---------------------------------------------------------
+        # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
+        # ---------------------------------------------------------
         with tab2:
             st.subheader(f"Site As-Builts: {selected_project}")
             
+            # 1. Extract just the job number (e.g., gets "2527" from "2527-Elizabeth")
             job_num = selected_project.split('-')[0].strip()
             as_builts_dir = "as_builts"
             
+            # 2. Check if the folder exists first
             if not os.path.exists(as_builts_dir):
                 st.warning(f"Please create an `{as_builts_dir}` folder in your main directory.")
             else:
+                # 3. Scan the folder for any images starting with the job number
                 found_images = []
                 for file_name in os.listdir(as_builts_dir):
+                    # Check if it starts with the job number AND is an image
                     if file_name.startswith(job_num) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
                         found_images.append(os.path.join(as_builts_dir, file_name))
                 
+                # 4. Sort the files so they appear in order (using your existing natural_sort_key function!)
                 found_images = sorted(found_images, key=natural_sort_key)
                 
+                # 5. Display the images or a fallback message
                 if found_images:
                     for img_path in found_images:
                         st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-                        st.markdown("---")
+                        st.markdown("---") # Adds a nice line between multiple images
                 else:
                     st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
 
@@ -464,5 +479,6 @@ elif selected_project != "All Projects":
     elif page == "Node Diagnostics":
         render_node_diagnostics(selected_project, display_tz, unit_label)
 
+# 4. FALLBACK
 else:
     st.info(f"👈 Please select a specific project from the sidebar to view the **{page}** dashboard.")
