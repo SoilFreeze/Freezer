@@ -42,32 +42,34 @@ page = st.sidebar.selectbox(
 )
 
 # =============================================================================
-# UI ELEMENT 2: ACTIVE PROJECT (Queries DB before UI is drawn)
+# UI ELEMENT 2: ACTIVE PROJECT (Bulletproof Python Filtering)
 # =============================================================================
-# Read the visibility state silently first so we can query the DB correctly
 show_archived = st.session_state.get('global_show_archived', False)
-
 project_metadata = None  
 sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # Broadened filter to ensure active projects aren't accidentally dropped
-        status_filter = "" if show_archived else "AND (UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1', 'T') OR ShowActive IS TRUE)"
-
+        # We fetch EVERYTHING and cast ShowActive to string to prevent BigQuery type errors
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
                 ProjectName, 
                 Timezone, 
                 ProjectStatus, 
-                Date_Freezedown
+                Date_Freezedown,
+                CAST(ShowActive AS STRING) as ShowActive
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
-              {status_filter}
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
+        
+        # FILTER IN PYTHON: This stops BigQuery from accidentally hiding your projects
+        if not show_archived and not proj_df.empty:
+            valid_active_flags = ['TRUE', 'YES', '1', 'T']
+            # Safely check if the string contains a truthy value
+            proj_df = proj_df[proj_df['ShowActive'].fillna('').astype(str).str.upper().str.strip().isin(valid_active_flags)]
         
         # Clean and strip whitespace
         proj_list = sorted([
@@ -92,7 +94,6 @@ if sidebar_client is not None:
             st.session_state['project_metadata'] = None
             
     except Exception as e:
-        # If it's failing because of SQL, it will show here so you can see exactly why
         st.sidebar.error(f"SQL/DB Error: {e}")
         selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
 else:
@@ -108,14 +109,11 @@ if st.sidebar.button("🔄 Refresh Data", width="stretch"):
         time.sleep(0.5)
         st.rerun()
 
-st.sidebar.divider()
-
 # =============================================================================
 # UI ELEMENT 4: VISIBILITY CONTROLS
 # =============================================================================
 st.sidebar.header("👁️ Visibility Controls")
 
-# Streamlit tracks these automatically via the 'key' argument
 st.sidebar.checkbox("Show Archived Projects", value=show_archived, key="global_show_archived")
 st.sidebar.checkbox("Show Ambient Temp", value=st.session_state.get('global_show_ambient', True), key="global_show_ambient")
 st.sidebar.checkbox("Show Masked Data", value=st.session_state.get('global_show_masked', False), key="global_show_masked")
@@ -137,11 +135,9 @@ except Exception:
 default_curve = False if 'maintenance' in p_status else True 
 st.sidebar.checkbox("Show Theoretical Curves", value=default_curve, key="global_show_ref")
 
-
 # =============================================================================
 # CONTINUING SIDEBAR: DATA AGES, TIMELINE, UNITS, ETC.
 # =============================================================================
-st.sidebar.divider()
 st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
@@ -193,7 +189,6 @@ if sidebar_client is not None:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
 
-st.sidebar.divider()
 st.sidebar.subheader("⏳ Timeline Navigation")
 
 show_full_dataset = st.sidebar.checkbox("🌍 See Full Data (Since Freezedown)", value=False, key="full_data_toggle")
@@ -260,7 +255,6 @@ unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
-st.sidebar.divider()
 st.sidebar.subheader("📱 Display & Time")
 
 default_tz_index = 2 
@@ -282,7 +276,6 @@ tz_mode = st.sidebar.selectbox(
 
 st.session_state["display_tz"] = tz_lookup[tz_mode]
 
-st.sidebar.divider()
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
@@ -378,8 +371,6 @@ elif selected_project != "All Projects":
             display_data = clean_data.copy()
             if selected_systems:
                 display_data = display_data[display_data['System'].astype(str).isin(selected_systems)]
-                
-            st.divider()
 
             unique_locations = display_data['Location'].dropna().unique()
             valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
