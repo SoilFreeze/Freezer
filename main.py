@@ -21,7 +21,7 @@ from app.pages.admin import render_admin_page
 # 1. UI SETUP
 st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
 
-# 2. SIDEBAR NAVIGATION
+# 2. SIDEBAR TITLE
 st.sidebar.title("❄️ SoilFreeze Lab")
 
 # ---------------------------------------------------------
@@ -42,7 +42,7 @@ page = st.sidebar.selectbox(
 )
 
 # ---------------------------------------------------------
-# 2. PROJECT SELECTION (Using original setup, patched for missing projects)
+# 2. PROJECT SELECTION (Exact Original Code)
 # ---------------------------------------------------------
 selected_project = "All Projects"
 project_metadata = None  
@@ -51,27 +51,24 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # We fetch all projects and the active status to avoid BigQuery casting errors hiding your list
+        # Determine the filter based on the toggle (Original)
+        status_filter = "" if st.session_state.get('global_show_archived', False) else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
                 ProjectName, 
                 Timezone, 
                 ProjectStatus, 
-                Date_Freezedown,
-                CAST(ShowActive AS STRING) as ShowActive_Str
+                Date_Freezedown
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
+              {status_filter}
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # Original logic applied via Python to guarantee the dropdown isn't empty
-        if not st.session_state.get('global_show_archived', False):
-            valid_flags = ['TRUE', 'YES', '1', 'T']
-            proj_df = proj_df[proj_df['ShowActive_Str'].fillna('').str.upper().str.strip().isin(valid_flags)]
-        
-        # Python fix from your original: Strip whitespace and filter out non-values
+        # Python fix: Strip whitespace and filter out non-values (Original)
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
@@ -82,6 +79,10 @@ if sidebar_client is not None:
             ["All Projects"] + proj_list, 
             key="sidebar_proj_picker_global"
         )
+        
+        # Diagnostic warning if the DB query returned nothing
+        if proj_df.empty:
+            st.sidebar.error("⚠️ Database returned 0 projects. Check BigQuery.")
         
         st.session_state['selected_project'] = selected_project
         
@@ -95,7 +96,7 @@ if sidebar_client is not None:
             
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-        # Added a fallback so the box doesn't vanish on an error
+        # Fallback render if query fails completely
         selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="sidebar_proj_picker_fallback")
 
 
@@ -350,7 +351,6 @@ if page in GLOBAL_PAGES:
             elif page == "Admin Tools":
                 render_admin_page(selected_project, display_tz, unit_mode, unit_label, active_refs)
         else:
-            st.divider()
             c1, c2, c3 = st.columns([1, 2, 1])
             with c2:
                 st.subheader("🔐 Restricted Admin Access")
