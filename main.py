@@ -21,10 +21,12 @@ from app.pages.admin import render_admin_page
 # 1. UI SETUP
 st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
 
-# 2. SIDEBAR NAVIGATION
+# 2. SIDEBAR TITLE
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# PAGE NAVIGATION
+# =============================================================================
+# UI ELEMENT 1: NAVIGATION
+# =============================================================================
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -40,27 +42,18 @@ page = st.sidebar.selectbox(
 )
 
 # =============================================================================
-# 3. VISIBILITY CONTROLS (Must be set BEFORE querying projects)
+# UI ELEMENT 2: ACTIVE PROJECT (Queries DB before UI is drawn)
 # =============================================================================
-st.sidebar.header("👁️ Visibility Controls")
+# Read the visibility state silently first so we can query the DB correctly
+show_archived = st.session_state.get('global_show_archived', False)
 
-# Streamlit tracks these automatically via the 'key' argument
-st.sidebar.checkbox("Show Archived Projects", value=False, key="global_show_archived")
-st.sidebar.checkbox("Show Ambient Temp", value=True, key="global_show_ambient")
-st.sidebar.checkbox("Show Masked Data", value=False, key="global_show_masked")
-st.sidebar.checkbox("Show Bad Data", value=False, key="global_show_baddata")
-
-
-# =============================================================================
-# 4. PROJECT SELECTION
-# =============================================================================
 project_metadata = None  
 sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # Determine the filter based on the toggle state above
-        status_filter = "" if st.session_state.global_show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1', 'T')"
+        # Broadened filter to ensure active projects aren't accidentally dropped
+        status_filter = "" if show_archived else "AND (UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1', 'T') OR ShowActive IS TRUE)"
 
         proj_q = f"""
             SELECT 
@@ -76,20 +69,20 @@ if sidebar_client is not None:
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # Clean and strip whitespace to prevent empty strings from showing up
+        # Clean and strip whitespace
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
         ])
         
-        # Render the selectbox with the native Streamlit key for state management
+        # Render the project selection
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
             ["All Projects"] + proj_list, 
             key="selected_project"
         )
         
-        # Load metadata if a specific project is chosen
+        # Load metadata
         if selected_project != "All Projects":
             meta_row = proj_df[proj_df['Project'] == selected_project]
             if not meta_row.empty:
@@ -99,17 +92,36 @@ if sidebar_client is not None:
             st.session_state['project_metadata'] = None
             
     except Exception as e:
-        st.sidebar.error(f"Registry Link Offline: {e}")
-        # FAIL-SAFE: Draw the box even if BigQuery errors out so it doesn't disappear
+        # If it's failing because of SQL, it will show here so you can see exactly why
+        st.sidebar.error(f"SQL/DB Error: {e}")
         selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
 else:
-    # FAIL-SAFE: Draw the box if the client fails to connect
     selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
 
+# =============================================================================
+# UI ELEMENT 3: REFRESH DATA BUTTON
+# =============================================================================
+if st.sidebar.button("🔄 Refresh Data", width="stretch"):
+    with st.sidebar.spinner("Purging cache maps..."):
+        st.cache_data.clear()
+        st.toast("System cache completely cleared!", icon="🔄")
+        time.sleep(0.5)
+        st.rerun()
+
+st.sidebar.divider()
 
 # =============================================================================
-# 5. THEORETICAL CURVES TOGGLE 
+# UI ELEMENT 4: VISIBILITY CONTROLS
 # =============================================================================
+st.sidebar.header("👁️ Visibility Controls")
+
+# Streamlit tracks these automatically via the 'key' argument
+st.sidebar.checkbox("Show Archived Projects", value=show_archived, key="global_show_archived")
+st.sidebar.checkbox("Show Ambient Temp", value=st.session_state.get('global_show_ambient', True), key="global_show_ambient")
+st.sidebar.checkbox("Show Masked Data", value=st.session_state.get('global_show_masked', False), key="global_show_masked")
+st.sidebar.checkbox("Show Bad Data", value=st.session_state.get('global_show_baddata', False), key="global_show_baddata")
+
+# THEORETICAL CURVES TOGGLE 
 p_meta = st.session_state.get('project_metadata')
 p_status = ""
 
@@ -123,13 +135,13 @@ except Exception:
     p_status = ""
 
 default_curve = False if 'maintenance' in p_status else True 
-
 st.sidebar.checkbox("Show Theoretical Curves", value=default_curve, key="global_show_ref")
 
 
 # =============================================================================
-# 6. CURRENT DATA AGES & DYNAMIC REFRESH ENGINE
+# CONTINUING SIDEBAR: DATA AGES, TIMELINE, UNITS, ETC.
 # =============================================================================
+st.sidebar.divider()
 st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
@@ -176,18 +188,10 @@ if sidebar_client is not None:
             st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
         else:
             st.sidebar.markdown(f"**{scope_label}:** ⚠️ No Recent Sync")
-            st.sidebar.write("Raw Sync Data:", pulse_df['last_sync'].iloc[0])
             
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
-# INTERACTIVE REFRESH TRIGGER
-if st.sidebar.button("🔄 Refresh Data", width="stretch"):
-    with st.sidebar.spinner("Purging cache maps..."):
-        st.cache_data.clear()
-        st.toast("System cache completely cleared!", icon="🔄")
-        time.sleep(0.5)
-        st.rerun()
 
 st.sidebar.divider()
 st.sidebar.subheader("⏳ Timeline Navigation")
@@ -245,7 +249,6 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
-# 7. MEASUREMENT & UNITS
 st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
     "Temperature Scale", 
@@ -258,8 +261,6 @@ st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
 st.sidebar.divider()
-
-# 8. TIMEZONE & DISPLAY
 st.sidebar.subheader("📱 Display & Time")
 
 default_tz_index = 2 
@@ -282,8 +283,6 @@ tz_mode = st.sidebar.selectbox(
 st.session_state["display_tz"] = tz_lookup[tz_mode]
 
 st.sidebar.divider()
-
-# 9. REFERENCE LINES (Static Constants)
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
