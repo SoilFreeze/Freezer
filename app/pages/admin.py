@@ -1024,7 +1024,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
             st.session_state.mapped_pipes = pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y'])
 
         col_map1, col_map2 = st.columns([3, 1])
-        AS_BUILT_DIR = "as_built" 
+        AS_BUILT_DIR = "as_builts" 
         
         with col_map2:
             # 1. Scan the folder for images
