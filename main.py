@@ -41,9 +41,7 @@ page = st.sidebar.selectbox(
     key="nav_page"
 )
 
-# ---------------------------------------------------------
-# 2. PROJECT SELECTION (Using original setup, patched for missing projects)
-# ---------------------------------------------------------
+# PROJECT SELECTION
 selected_project = "All Projects"
 project_metadata = None  
 
@@ -51,27 +49,25 @@ sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # We fetch all projects and the active status to avoid BigQuery casting errors hiding your list
+        # SAFE STATE CHECK: Using .get() prevents the AttributeError on first load
+        show_archived = st.session_state.get('global_show_archived', False)
+        status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1', 'T')"
+
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
                 ProjectName, 
                 Timezone, 
                 ProjectStatus, 
-                Date_Freezedown,
-                CAST(ShowActive AS STRING) as ShowActive_Str
+                Date_Freezedown
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
+              {status_filter}
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # Original logic applied via Python to guarantee the dropdown isn't empty
-        if not st.session_state.get('global_show_archived', False):
-            valid_flags = ['TRUE', 'YES', '1', 'T']
-            proj_df = proj_df[proj_df['ShowActive_Str'].fillna('').str.upper().str.strip().isin(valid_flags)]
-        
-        # Python fix from your original: Strip whitespace and filter out non-values
+        # Python fix: Strip whitespace and filter out non-values
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
@@ -95,9 +91,6 @@ if sidebar_client is not None:
             
     except Exception as e:
         st.sidebar.error(f"Registry Link Offline: {e}")
-        # Added a fallback so the box doesn't vanish on an error
-        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="sidebar_proj_picker_fallback")
-
 
 # ---------------------------------------------------------
 # 3. INTERACTIVE REFRESH TRIGGER
