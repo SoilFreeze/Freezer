@@ -4,10 +4,12 @@ import time
 import re
 import requests
 import numpy as np
+import os
 from PIL import Image
 from streamlit_image_coordinates import streamlit_image_coordinates
 from datetime import datetime, timedelta
 from google.cloud import bigquery
+
 
 # Internal Config & Data connections
 from app.utils.config import (
@@ -1015,7 +1017,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 # --- SUB-TAB 5: AS-BUILT PIPE MAPPER ---
     with tab_pipe_mapper:
         st.subheader("🗺️ As-Built Pipe Mapper")
-        st.markdown("Upload a site plan to log X/Y pixel coordinates for the pipes. Download the CSV when finished to paste into your Google Sheet.")
+        st.markdown("Select a site plan to log X/Y pixel coordinates for the pipes. Download the CSV when finished to paste into your Google Sheet.")
         
         # Initialize session memory to store clicks
         if 'mapped_pipes' not in st.session_state:
@@ -1023,42 +1025,60 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 
         col_map1, col_map2 = st.columns([3, 1])
 
+        # Define where your images live
+        AS_BUILT_DIR = "as_built" 
+        
         with col_map2:
-            uploaded_file = st.file_uploader("Upload As-Built Image (PNG/JPG)", type=["png", "jpg", "jpeg"], key="map_uploader")
+            # 1. Scan the folder for images
+            available_images = []
+            if os.path.exists(AS_BUILT_DIR):
+                available_images = sorted([f for f in os.listdir(AS_BUILT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.pdf'))])
             
-            if uploaded_file:
+            if not available_images:
+                st.error(f"No images found in the '{AS_BUILT_DIR}' folder.")
+                selected_image = "(None)"
+            else:
+                selected_image = st.selectbox("Select As-Built Image:", ["(None)"] + available_images)
+            
+            if selected_image != "(None)":
                 pipe_name = st.text_input("Pipe Name (e.g., TP-0031):", key="mapper_pipe_input").upper().strip()
                 
                 st.dataframe(st.session_state.mapped_pipes, use_container_width=True, hide_index=True)
                 
                 if not st.session_state.mapped_pipes.empty:
                     csv = st.session_state.mapped_pipes.to_csv(index=False)
-                    st.download_button("⬇️ Download CSV", data=csv, file_name="pipe_coordinates.csv", mime="text/csv", use_container_width=True)
+                    st.download_button("⬇️ Download CSV", data=csv, file_name=f"{selected_image}_coordinates.csv", mime="text/csv", use_container_width=True)
                     
                     if st.button("Clear All Data", use_container_width=True):
                         st.session_state.mapped_pipes = pd.DataFrame(columns=['NodeNum', 'Map_X', 'Map_Y'])
                         st.rerun()
 
         with col_map1:
-            if uploaded_file:
-                img = Image.open(uploaded_file)
+            if selected_image != "(None)":
+                # 2. Build the full path to the image and open it
+                img_path = os.path.join(AS_BUILT_DIR, selected_image)
                 
-                if pipe_name:
-                    st.info(f"👆 Click on the map to log coordinates for **{pipe_name}**.")
-                else:
-                    st.warning("⚠️ Enter a Pipe Name on the right before clicking!")
+                try:
+                    img = Image.open(img_path)
                     
-                # Render the interactive image
-                click_data = streamlit_image_coordinates(img, key="site_map")
-                
-                # Process the click
-                if click_data is not None and pipe_name:
-                    x_coord, y_coord = click_data['x'], click_data['y']
-                    
-                    if pipe_name in st.session_state.mapped_pipes['NodeNum'].values:
-                        st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['NodeNum'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
+                    if pipe_name:
+                        st.info(f"👆 Click on the map to log coordinates for **{pipe_name}**.")
                     else:
-                        new_row = pd.DataFrame({'NodeNum': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
-                        st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
+                        st.warning("⚠️ Enter a Pipe Name on the right before clicking!")
+                        
+                    # Render the interactive image
+                    click_data = streamlit_image_coordinates(img, key="site_map")
                     
-                    st.rerun()
+                    # Process the click
+                    if click_data is not None and pipe_name:
+                        x_coord, y_coord = click_data['x'], click_data['y']
+                        
+                        if pipe_name in st.session_state.mapped_pipes['NodeNum'].values:
+                            st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['NodeNum'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
+                        else:
+                            new_row = pd.DataFrame({'NodeNum': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
+                            st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
+                        
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Could not load image {selected_image}. Error: {e}")
