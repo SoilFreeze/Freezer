@@ -21,12 +21,12 @@ from app.pages.admin import render_admin_page
 # 1. UI SETUP
 st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
 
-# 2. SIDEBAR TITLE
+# 2. SIDEBAR NAVIGATION
 st.sidebar.title("❄️ SoilFreeze Lab")
 
-# =============================================================================
-# UI ELEMENT 1: NAVIGATION
-# =============================================================================
+# ---------------------------------------------------------
+# 1. NAVIGATION
+# ---------------------------------------------------------
 page = st.sidebar.selectbox(
     "Navigation", 
     [
@@ -41,16 +41,17 @@ page = st.sidebar.selectbox(
     key="nav_page"
 )
 
-# =============================================================================
-# UI ELEMENT 2: ACTIVE PROJECT (Bulletproof Python Filtering)
-# =============================================================================
-show_archived = st.session_state.get('global_show_archived', False)
+# ---------------------------------------------------------
+# 2. PROJECT SELECTION (Using original setup, patched for missing projects)
+# ---------------------------------------------------------
+selected_project = "All Projects"
 project_metadata = None  
+
 sidebar_client = get_bq_client()
 
 if sidebar_client is not None:
     try:
-        # We fetch EVERYTHING and cast ShowActive to string to prevent BigQuery type errors
+        # We fetch all projects and the active status to avoid BigQuery casting errors hiding your list
         proj_q = f"""
             SELECT 
                 CAST(Project AS STRING) as Project, 
@@ -58,33 +59,32 @@ if sidebar_client is not None:
                 Timezone, 
                 ProjectStatus, 
                 Date_Freezedown,
-                CAST(ShowActive AS STRING) as ShowActive
+                CAST(ShowActive AS STRING) as ShowActive_Str
             FROM `{config.PROJECT_REGISTRY_TABLE}` 
             WHERE Project IS NOT NULL 
               AND TRIM(CAST(Project AS STRING)) != ''
         """
         proj_df = sidebar_client.query(proj_q).to_dataframe()
         
-        # FILTER IN PYTHON: This stops BigQuery from accidentally hiding your projects
-        if not show_archived and not proj_df.empty:
-            valid_active_flags = ['TRUE', 'YES', '1', 'T']
-            # Safely check if the string contains a truthy value
-            proj_df = proj_df[proj_df['ShowActive'].fillna('').astype(str).str.upper().str.strip().isin(valid_active_flags)]
+        # Original logic applied via Python to guarantee the dropdown isn't empty
+        if not st.session_state.get('global_show_archived', False):
+            valid_flags = ['TRUE', 'YES', '1', 'T']
+            proj_df = proj_df[proj_df['ShowActive_Str'].fillna('').str.upper().str.strip().isin(valid_flags)]
         
-        # Clean and strip whitespace
+        # Python fix from your original: Strip whitespace and filter out non-values
         proj_list = sorted([
             str(p).strip() for p in proj_df['Project'].unique() 
             if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']
         ])
         
-        # Render the project selection
         selected_project = st.sidebar.selectbox(
             "🎯 Active Project", 
             ["All Projects"] + proj_list, 
-            key="selected_project"
+            key="sidebar_proj_picker_global"
         )
         
-        # Load metadata
+        st.session_state['selected_project'] = selected_project
+        
         if selected_project != "All Projects":
             meta_row = proj_df[proj_df['Project'] == selected_project]
             if not meta_row.empty:
@@ -94,14 +94,14 @@ if sidebar_client is not None:
             st.session_state['project_metadata'] = None
             
     except Exception as e:
-        st.sidebar.error(f"SQL/DB Error: {e}")
-        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
-else:
-    selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="selected_project")
+        st.sidebar.error(f"Registry Link Offline: {e}")
+        # Added a fallback so the box doesn't vanish on an error
+        selected_project = st.sidebar.selectbox("🎯 Active Project", ["All Projects"], key="sidebar_proj_picker_fallback")
 
-# =============================================================================
-# UI ELEMENT 3: REFRESH DATA BUTTON
-# =============================================================================
+
+# ---------------------------------------------------------
+# 3. INTERACTIVE REFRESH TRIGGER
+# ---------------------------------------------------------
 if st.sidebar.button("🔄 Refresh Data", width="stretch"):
     with st.sidebar.spinner("Purging cache maps..."):
         st.cache_data.clear()
@@ -109,20 +109,27 @@ if st.sidebar.button("🔄 Refresh Data", width="stretch"):
         time.sleep(0.5)
         st.rerun()
 
-# =============================================================================
-# UI ELEMENT 4: VISIBILITY CONTROLS
-# =============================================================================
+
+# ---------------------------------------------------------
+# 4. VISIBILITY CONTROLS
+# ---------------------------------------------------------
 st.sidebar.header("👁️ Visibility Controls")
 
-st.sidebar.checkbox("Show Archived Projects", value=show_archived, key="global_show_archived")
-st.sidebar.checkbox("Show Ambient Temp", value=st.session_state.get('global_show_ambient', True), key="global_show_ambient")
-st.sidebar.checkbox("Show Masked Data", value=st.session_state.get('global_show_masked', False), key="global_show_masked")
-st.sidebar.checkbox("Show Bad Data", value=st.session_state.get('global_show_baddata', False), key="global_show_baddata")
+# 1. Archived Projects Toggle
+st.session_state['global_show_archived'] = st.sidebar.checkbox(
+    "Show Archived Projects", 
+    value=st.session_state.get('global_show_archived', False)
+)
 
-# THEORETICAL CURVES TOGGLE 
+# 2. Ambient Temp Toggle
+st.session_state['global_show_ambient'] = st.sidebar.checkbox(
+    "Show Ambient Temp", 
+    value=st.session_state.get('global_show_ambient', True)
+)
+
+# 3. Theoretical Curve (Auto-toggles based on Project Status)
 p_meta = st.session_state.get('project_metadata')
 p_status = ""
-
 try:
     if p_meta is not None:
         if hasattr(p_meta, 'get'):
@@ -133,11 +140,27 @@ except Exception:
     p_status = ""
 
 default_curve = False if 'maintenance' in p_status else True 
-st.sidebar.checkbox("Show Theoretical Curves", value=default_curve, key="global_show_ref")
 
-# =============================================================================
-# CONTINUING SIDEBAR: DATA AGES, TIMELINE, UNITS, ETC.
-# =============================================================================
+st.session_state['global_show_ref'] = st.sidebar.checkbox(
+    "Show Theoretical Curves", 
+    value=st.session_state.get('global_show_ref', default_curve)
+)
+
+# 4 & 5. Independent Data Auditing Controls
+st.session_state['global_show_masked'] = st.sidebar.checkbox(
+    "Show Masked Data", 
+    value=st.session_state.get('global_show_masked', False)
+)
+
+st.session_state['global_show_baddata'] = st.sidebar.checkbox(
+    "Show Bad Data", 
+    value=st.session_state.get('global_show_baddata', False)
+)
+
+
+# ---------------------------------------------------------
+# 5. CURRENT DATA AGES
+# ---------------------------------------------------------
 st.sidebar.subheader("⏱️ Current Data Ages")
 
 if sidebar_client is not None:
@@ -184,11 +207,15 @@ if sidebar_client is not None:
             st.sidebar.caption(f"Last Entry: `{last_sync_str}`")
         else:
             st.sidebar.markdown(f"**{scope_label}:** ⚠️ No Recent Sync")
+            st.sidebar.write("Raw Sync Data:", pulse_df['last_sync'].iloc[0])
             
     except Exception as pulse_err:
         st.sidebar.caption(f"Pulse tracking suspended: {pulse_err}")
 
 
+# ---------------------------------------------------------
+# 6. TIMELINE NAVIGATION
+# ---------------------------------------------------------
 st.sidebar.subheader("⏳ Timeline Navigation")
 
 show_full_dataset = st.sidebar.checkbox("🌍 See Full Data (Since Freezedown)", value=False, key="full_data_toggle")
@@ -244,6 +271,9 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
+# ---------------------------------------------------------
+# 7. UNITS
+# ---------------------------------------------------------
 st.sidebar.subheader("🌡️ Units")
 unit_mode = st.sidebar.radio(
     "Temperature Scale", 
@@ -255,6 +285,10 @@ unit_label = "°F" if unit_mode == "Fahrenheit" else "°C"
 st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
+
+# ---------------------------------------------------------
+# 8. DISPLAY & TIME
+# ---------------------------------------------------------
 st.sidebar.subheader("📱 Display & Time")
 
 default_tz_index = 2 
@@ -276,6 +310,10 @@ tz_mode = st.sidebar.selectbox(
 
 st.session_state["display_tz"] = tz_lookup[tz_mode]
 
+
+# ---------------------------------------------------------
+# 9. REFERENCE LINES
+# ---------------------------------------------------------
 st.sidebar.subheader("📏 Reference Lines")
 active_refs = [] 
 
@@ -289,6 +327,7 @@ if st.sidebar.checkbox("Type A (10.2°F)", value=False, key="ref_type_a"):
 st.session_state["active_refs"] = tuple(active_refs)
 
 display_tz = st.session_state.get("display_tz", "UTC")
+
 
 # =============================================================================
 # MASTER LAYOUT FRAMEWORK PAGE ROUTER
