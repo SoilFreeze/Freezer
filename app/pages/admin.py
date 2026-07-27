@@ -1029,7 +1029,7 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
         AS_BUILT_DIR = "as_builts" 
         
         with col_map2:
-            # 1. Scan the folder for images (Removed .pdf, PIL can only read images)
+            # 1. Scan the folder for images
             available_images = []
             if os.path.exists(AS_BUILT_DIR):
                 available_images = sorted([f for f in os.listdir(AS_BUILT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
@@ -1038,11 +1038,35 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 st.error(f"No image files found in the '{AS_BUILT_DIR}' folder.")
                 selected_image = "(None)"
             else:
-                selected_image = st.selectbox("Select As-Built Image:", ["(None)"] + available_images)
+                selected_image = st.selectbox("1. Select As-Built Image:", ["(None)"] + available_images)
             
             if selected_image != "(None)":
-                pipe_name = st.text_input("Pipe Name (e.g., TP-0031):", key="mapper_pipe_input").upper().strip()
+                # --- NEW: Smart Project Linking & Queue ---
+                all_projects = ["(None)"] + sorted(full_reg_df['Project'].dropna().unique().tolist())
+                selected_mapper_proj = st.selectbox("2. Link to Project Database:", all_projects)
                 
+                pipe_options = []
+                if selected_mapper_proj != "(None)":
+                    # Grab all unique nodes for this specific project
+                    proj_df = full_reg_df[full_reg_df['Project'] == selected_mapper_proj]
+                    pipe_options = sorted(proj_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+                
+                if not pipe_options:
+                    # Fallback to manual typing if no project is linked
+                    pipe_name = st.text_input("3. Pipe Name (Manual Entry):", key="mapper_pipe_input").upper().strip()
+                else:
+                    # The Auto-Advancing Queue Logic
+                    mapped_list = st.session_state.mapped_pipes['NodeNum'].tolist()
+                    unmapped_pipes = [p for p in pipe_options if p not in mapped_list]
+                    
+                    # Find the index of the first unmapped pipe so the dropdown jumps to it automatically
+                    default_idx = 0
+                    if unmapped_pipes:
+                        default_idx = pipe_options.index(unmapped_pipes[0])
+                        
+                    pipe_name = st.selectbox("3. Select Pipe to Map (Auto-advances):", pipe_options, index=default_idx)
+                # ------------------------------------------
+
                 st.dataframe(st.session_state.mapped_pipes, use_container_width=True, hide_index=True)
                 
                 if not st.session_state.mapped_pipes.empty:
@@ -1051,9 +1075,8 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     
                     if st.button("Clear All Data", use_container_width=True):
                         st.session_state.mapped_pipes = pd.DataFrame(columns=['NodeNum', 'Map_X', 'Map_Y'])
-                        st.session_state.pop('last_click', None) # Clear click history too
+                        st.session_state.pop('last_click', None) 
                         st.rerun()
-
         with col_map1:
             if selected_image != "(None)":
                 img_path = os.path.join(AS_BUILT_DIR, selected_image)
