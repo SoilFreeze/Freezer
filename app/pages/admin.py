@@ -1017,16 +1017,14 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
 # --- SUB-TAB 5: AS-BUILT PIPE MAPPER ---
     with tab_pipe_mapper:
         st.subheader("🗺️ As-Built Pipe Mapper")
-        st.markdown("Select a site plan to log X/Y pixel coordinates for the pipes. Download the CSV when finished to paste into your Google Sheet.")
+        st.markdown("Select a site plan to log X/Y pixel coordinates for physical locations. Download the CSV when finished to paste into your Google Sheet.")
         
-        # Initialize session memory to store clicks
-        if 'mapped_pipes' not in st.session_state:
-            st.session_state.mapped_pipes = pd.DataFrame(columns=['NodeNum', 'Map_X', 'Map_Y'])
+        # Initialize session memory (Added a safety check to reset it if it still has the old NodeNum column)
+        if 'mapped_pipes' not in st.session_state or 'Location' not in st.session_state.mapped_pipes.columns:
+            st.session_state.mapped_pipes = pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y'])
 
         col_map1, col_map2 = st.columns([3, 1])
-
-        # Define where your images live
-        AS_BUILT_DIR = "as_builts" 
+        AS_BUILT_DIR = "as_built" 
         
         with col_map2:
             # 1. Scan the folder for images
@@ -1041,31 +1039,27 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                 selected_image = st.selectbox("1. Select As-Built Image:", ["(None)"] + available_images)
             
             if selected_image != "(None)":
-                # --- NEW: Smart Project Linking & Queue ---
                 all_projects = ["(None)"] + sorted(full_reg_df['Project'].dropna().unique().tolist())
                 selected_mapper_proj = st.selectbox("2. Link to Project Database:", all_projects)
                 
                 pipe_options = []
                 if selected_mapper_proj != "(None)":
-                    # Grab all unique nodes for this specific project
                     proj_df = full_reg_df[full_reg_df['Project'] == selected_mapper_proj]
-                    pipe_options = sorted(proj_df['NodeNum'].dropna().unique().tolist(), key=natural_sort_key)
+                    # CHANGED: Now pulling unique Locations (T1, T2, etc.) instead of NodeNums
+                    pipe_options = sorted(proj_df['Location'].dropna().astype(str).unique().tolist(), key=natural_sort_key)
                 
                 if not pipe_options:
-                    # Fallback to manual typing if no project is linked
-                    pipe_name = st.text_input("3. Pipe Name (Manual Entry):", key="mapper_pipe_input").upper().strip()
+                    pipe_name = st.text_input("3. Location Name (Manual Entry):", key="mapper_pipe_input").upper().strip()
                 else:
-                    # The Auto-Advancing Queue Logic
-                    mapped_list = st.session_state.mapped_pipes['NodeNum'].tolist()
+                    # Auto-Advancing Queue Logic for Locations
+                    mapped_list = st.session_state.mapped_pipes['Location'].tolist()
                     unmapped_pipes = [p for p in pipe_options if p not in mapped_list]
                     
-                    # Find the index of the first unmapped pipe so the dropdown jumps to it automatically
                     default_idx = 0
                     if unmapped_pipes:
                         default_idx = pipe_options.index(unmapped_pipes[0])
                         
-                    pipe_name = st.selectbox("3. Select Pipe to Map (Auto-advances):", pipe_options, index=default_idx)
-                # ------------------------------------------
+                    pipe_name = st.selectbox("3. Select Location to Map (Auto-advances):", pipe_options, index=default_idx)
 
                 st.dataframe(st.session_state.mapped_pipes, use_container_width=True, hide_index=True)
                 
@@ -1074,9 +1068,10 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     st.download_button("⬇️ Download CSV", data=csv, file_name=f"{selected_image}_coordinates.csv", mime="text/csv", use_container_width=True)
                     
                     if st.button("Clear All Data", use_container_width=True):
-                        st.session_state.mapped_pipes = pd.DataFrame(columns=['NodeNum', 'Map_X', 'Map_Y'])
+                        st.session_state.mapped_pipes = pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y'])
                         st.session_state.pop('last_click', None) 
                         st.rerun()
+
         with col_map1:
             if selected_image != "(None)":
                 img_path = os.path.join(AS_BUILT_DIR, selected_image)
@@ -1087,23 +1082,24 @@ def render_admin_page(selected_project, display_tz, unit_mode, unit_label, activ
                     if pipe_name:
                         st.info(f"👆 Click on the map to log coordinates for **{pipe_name}**.")
                     else:
-                        st.warning("⚠️ Enter a Pipe Name on the right before clicking!")
+                        st.warning("⚠️ Enter a Location on the right before clicking!")
                         
                     click_data = streamlit_image_coordinates(img, key="site_map")
                     
-                    # 2. Prevent the infinite rerun loop by checking if this is a NEW click
+                    # Prevent the infinite rerun loop
                     if click_data is not None and pipe_name:
                         click_hash = f"{click_data['x']}-{click_data['y']}"
                         
                         if st.session_state.get('last_click') != click_hash:
-                            st.session_state['last_click'] = click_hash # Remember this click
+                            st.session_state['last_click'] = click_hash 
                             
                             x_coord, y_coord = click_data['x'], click_data['y']
                             
-                            if pipe_name in st.session_state.mapped_pipes['NodeNum'].values:
-                                st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['NodeNum'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
+                            # Save to the Location column
+                            if pipe_name in st.session_state.mapped_pipes['Location'].values:
+                                st.session_state.mapped_pipes.loc[st.session_state.mapped_pipes['Location'] == pipe_name, ['Map_X', 'Map_Y']] = [x_coord, y_coord]
                             else:
-                                new_row = pd.DataFrame({'NodeNum': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
+                                new_row = pd.DataFrame({'Location': [pipe_name], 'Map_X': [x_coord], 'Map_Y': [y_coord]})
                                 st.session_state.mapped_pipes = pd.concat([st.session_state.mapped_pipes, new_row], ignore_index=True)
                             
                             st.rerun()
