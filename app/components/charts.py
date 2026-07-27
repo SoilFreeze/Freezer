@@ -4,6 +4,9 @@ import plotly.graph_objects as go
 import re
 import app.utils.config as cfg
 from app.data.processor import get_bq_client 
+import plotly.graph_objects as go
+from PIL import Image
+import os
 
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
@@ -46,7 +49,69 @@ def get_cached_ambient_data(job_num, start_str):
         return client.query(amb_q).to_dataframe()
     except:
         return pd.DataFrame()
+def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts"):
+    """
+    Generates a dynamically cropped Plotly map centered on a specific pipe location.
+    """
+    # 1. Filter the TempPipeLoc dataframe for the specific project and location
+    pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
+    
+    if pipe_data.empty:
+        return None # Fails gracefully if coordinates aren't mapped yet
+        
+    pipe_x = float(pipe_data.iloc[0]['Map_X'])
+    pipe_y = float(pipe_data.iloc[0]['Map_Y'])
 
+    # 2. Find the associated as-built image (assuming the filename starts with the project ID)
+    if not os.path.exists(as_built_dir):
+        return None
+        
+    available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    
+    if not available_files:
+        return None
+        
+    img_path = os.path.join(as_built_dir, available_files[0])
+    img = Image.open(img_path)
+
+    # 3. Build the Plotly Figure
+    fig = go.Figure()
+
+    # Add the red dot for the specific pipe location
+    fig.add_trace(go.Scatter(
+        x=[pipe_x], 
+        y=[pipe_y],
+        mode='markers+text',
+        name=location_name,
+        marker=dict(size=18, color='red', line=dict(width=3, color='white')),
+        text=[f"<b>{location_name}</b>"],
+        textposition="top center",
+        textfont=dict(color="red", size=16, family="Arial Black"),
+        hoverinfo='none'
+    ))
+
+    # Set the image as the background
+    # Note: Y-axis inversion is standard for image processing (0 is top left)
+    fig.update_layout(
+        images=[dict(
+            source=img,
+            xref="x", yref="y",
+            x=0, y=img.height, 
+            sizex=img.width, sizey=img.height,
+            sizing="stretch",
+            opacity=0.9,
+            layer="below"
+        )],
+        # Lock the view to a 600x600 pixel window centered directly on the pipe
+        xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
+        margin=dict(l=0, r=0, t=0, b=0), # Strip out all Plotly whitespace
+        showlegend=False,
+        height=400 # Keep it compact so it fits nicely next to your temp charts
+    )
+    
+    return fig
+    
 def build_high_speed_graph(client, df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
                            display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, show_elevation=False):
     """
