@@ -716,10 +716,10 @@ def render_client_portal():
                      st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
                 else:
                     for filename in asbuilt_filenames:
+                        # --- UPDATED: Now points to the correct "as_builts" folder ---
                         possible_paths = [
-                            os.path.join("assets", "asbuilts", filename), 
-                            filename, 
-                            os.path.join("assets", filename)
+                            os.path.join("as_builts", filename), 
+                            filename
                         ]
                         img_found = False
                         for path in possible_paths:
@@ -738,9 +738,8 @@ def render_client_portal():
                                     break
                         
                         if not img_found:
-                            st.error(f"❌ Drawing Not Found: '{filename}'")
+                            st.error(f"❌ Drawing Not Found: '{filename}' in the as_builts folder.")
             else:
                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-
 # --- EXECUTION ---
 render_client_portal()
