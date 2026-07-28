@@ -89,7 +89,7 @@ def get_universal_portal_data(target_job_number):
     # 1. Fetch the raw, approved telemetry directly from the master view
     query = f"""
         SELECT 
-            Project, System, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
+            Project, Phase, System, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
         WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
           
@@ -628,51 +628,45 @@ def render_client_portal():
     proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
     master_df['Project'] = master_df['Project'].astype(str).str.strip()
     
-    available_phases = sorted(proj_registry['Project'].dropna().unique(), key=natural_sort_key)
-    
     # ===============================================================
     # --- DYNAMIC PHASE & SYSTEM FILTERS ---
     # ===============================================================
     st.markdown("<br>", unsafe_allow_html=True)
     
+    # Extract phases dynamically from the explicit Phase column
+    available_phases = []
+    if 'Phase' in master_df.columns:
+        available_phases = sorted(
+            [str(p) for p in master_df['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']], 
+            key=natural_sort_key
+        )
+        
+    full_p_df = master_df.copy()
+    selected_phase = None
+    
     # 1. PHASE SELECTOR
     if len(available_phases) > 1:
         selected_phase = st.selectbox("📂 **Select Project Phase:**", available_phases)
+        # Force the dataframe to drop all graphs not in this specific phase
+        full_p_df = full_p_df[full_p_df['Phase'].astype(str) == str(selected_phase).strip()]
     elif len(available_phases) == 1:
         selected_phase = available_phases[0]
-    else:
-        st.error("No valid phases found in the data.")
-        return
-
-    # Slice the data to the target phase first
-    target_phase_clean = str(selected_phase).strip()
-    full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
-
-    # --- Fallback Project Matching (Kept from your original code) ---
-    if full_p_df.empty:
-        available_telemetry_projects = master_df['Project'].astype(str).str.strip().dropna().unique()
-        for telemetry_proj in available_telemetry_projects:
-            if telemetry_proj in target_phase_clean or target_phase_clean in telemetry_proj:
-                full_p_df = master_df[master_df['Project'] == telemetry_proj].copy()
-                break
-                
-        if full_p_df.empty:
-            root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
-            full_p_df = master_df[master_df['Project'].str.startswith(root_id, na=False)].copy()
+        # Even if there's only 1 phase, filter to it just to be clean
+        full_p_df = full_p_df[full_p_df['Phase'].astype(str) == str(selected_phase).strip()]
 
     # 2. SYSTEM SELECTOR
     available_systems = []
     if not full_p_df.empty and 'System' in full_p_df.columns:
-        # Extract unique systems for this specific phase
+        # Get systems only for the currently filtered Phase
         available_systems = sorted(
-            [str(s) for s in full_p_df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
+            [str(s) for s in full_p_df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']], 
             key=natural_sort_key
         )
         
-        # Only show the System dropdown if there are 2 or more systems
+        # Only show the System dropdown if 2 or more exist
         if len(available_systems) > 1:
             selected_systems = st.multiselect(
-                "⚙️ **Filter by System:** (Leave blank to view all systems)", 
+                f"⚙️ **Filter by System:** (Leave blank to view all systems in {selected_phase})", 
                 options=available_systems, 
                 default=[]  
             )
@@ -681,38 +675,35 @@ def render_client_portal():
             if selected_systems:
                 full_p_df = full_p_df[full_p_df['System'].astype(str).isin(selected_systems)]
 
-    # Draw a horizontal line ONLY if at least one of the UI menus was displayed to the user
+    # Draw a horizontal line ONLY if at least one of the UI menus was displayed
     if len(available_phases) > 1 or len(available_systems) > 1:
         st.markdown("<hr>", unsafe_allow_html=True)
-    # ===============================================================
-
-    # Default toggles are hardcoded on for clients
-    show_theoretical = True
-    show_ambient = True
-    show_elevation = False
-    show_as_built = True
-
-    # Force 6 week view
-    weeks_view = 6
-
-    target_phase_clean = str(selected_phase).strip()
-    full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
-
-    if full_p_df.empty:
-        available_telemetry_projects = master_df['Project'].astype(str).str.strip().dropna().unique()
         
-        for telemetry_proj in available_telemetry_projects:
-            if telemetry_proj in target_phase_clean or target_phase_clean in telemetry_proj:
-                full_p_df = master_df[master_df['Project'] == telemetry_proj].copy()
-                break
-                
-        if full_p_df.empty:
-            root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
-            full_p_df = master_df[master_df['Project'].str.startswith(root_id, na=False)].copy()
+    if full_p_df.empty:
+        st.error("❌ No data found for the selected Phase/System filters.")
+        st.stop()
 
+    # --- REGISTRY METADATA LOOKUP ---
+    phase_row = proj_registry.iloc[[0]] # Default to the root job entry
+    if selected_phase:
+        # If your registry has specific rows for phases (e.g., "2538-Phase1"), try to match it
+        specific_row = proj_registry[proj_registry['Project'].str.contains(str(selected_phase), case=False, na=False)]
+        if not specific_row.empty:
+            phase_row = specific_row
+
+    primary_meta = phase_row.iloc[0].to_dict()
+    display_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
+    
+    # Append the Phase name to the main title if it isn't already in the project name
+    if selected_phase and str(selected_phase).lower() not in str(display_name).lower():
+        display_name = f"{display_name} - {selected_phase}"
+        
+    local_tz = primary_meta.get('Timezone', 'US/Pacific')
+    
+    # --- AMBIENT DATA INJECTION (Unchanged) ---
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
     ambient_data_global = master_df[ambient_mask_master].copy()
-    
+  
     if not full_p_df.empty:
         ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
         if not ambient_data_global.empty and not ambient_mask_phase.any():
