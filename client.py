@@ -388,7 +388,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
 # --- UI TABS ---
 
-def render_summary_tab(master_df, unit_label, local_tz, base_project_name, start_date_text, day_count_text):
+def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_registry):
     df_local = master_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
@@ -423,8 +423,26 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, start
         if phase_df['PipeType'].nunique() == 1 and phase_df['PipeType'].iloc[0] == 'Ambient':
             continue
             
-        # Dynamically build the title (e.g., "SR 16/SR 160/Kitsap County Fish Passage - Phase 2")
         phase_str = str(phase).strip()
+        
+        # --- GET PER-PHASE DATES ---
+        phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict() # default fallback
+        if phase_str != 'Default' and phase_str != 'Unassigned Phase':
+            # Match the specific phase in the registry to get its unique dates
+            specific_row = proj_registry[proj_registry['Project'].str.contains(phase_str, case=False, na=False)]
+            if not specific_row.empty:
+                phase_meta = specific_row.iloc[0].to_dict()
+                
+        f_start_date = None
+        day_count_text = ""
+        start_date_text = ""
+        if pd.notnull(phase_meta.get('Date_Freezedown')):
+            f_start_date = pd.to_datetime(phase_meta.get('Date_Freezedown')).date()
+            days_since = (now_local.date() - f_start_date).days
+            day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
+            start_date_text = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}"
+
+        # Dynamically build the title
         if phase_str.lower() in base_project_name.lower() or base_project_name.lower() in phase_str.lower() or phase_str == 'Default':
             header_title = base_project_name
         else:
@@ -449,7 +467,6 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, start
                 if sys_check['PipeType'].nunique() == 1 and sys_check['PipeType'].iloc[0] == 'Ambient':
                     continue 
             
-            # Print the system exactly as it appears in your file (e.g., "System 22" or "System 53")
             system_str = str(system).strip()
             if system_str.upper() != 'DEFAULT' and system_str.upper() != 'UNASSIGNED SYSTEM':
                 st.markdown(f"##### ⚙️ {system_str}")
@@ -789,18 +806,7 @@ def render_client_portal():
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
-        start_date_display = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}" if f_start_date else ""
-        render_summary_tab(master_df, "°F", local_tz, display_name, start_date_display, day_count_text)
-
-    with tabs[0]:
-        # Grab the pure base project name from the registry
-        base_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
-        
-        # Format the start date string to match your screenshot
-        start_date_display = f"Start Freezedown: {f_start_date.strftime('%b %d, %Y')}" if f_start_date else ""
-        
-        # Execute the summary tab with the new parameters
-        render_summary_tab(master_df, "°F", local_tz, base_project_name, start_date_display, day_count_text)
+        render_summary_tab(master_df, "°F", local_tz) # Or whatever parameters you had here
         
         try:
             map_query = f"""
