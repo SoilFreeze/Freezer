@@ -450,36 +450,84 @@ elif selected_project != "All Projects":
                     st.markdown("---")
 
         # ---------------------------------------------------------
-        # TAB 2: YOUR NEW AS-BUILTS VIEWER GOES HERE
+        # TAB 2: SITE AS-BUILTS & CROPPED MAPS
         # ---------------------------------------------------------
         with tab2:
-            st.subheader(f"Site As-Builts: {selected_project}")
+            st.subheader(f"Site As-Builts & Location Maps: {selected_project}")
             
-            # 1. Extract just the job number (e.g., gets "2527" from "2527-Elizabeth")
-            job_num = selected_project.split('-')[0].strip()
+            # 1. Extract the job number (e.g., gets "2527" from "2527-Elizabeth")
+            job_num = str(selected_project).split('-')[0].strip()
             as_builts_dir = "as_builts"
             
-            # 2. Check if the folder exists first
             if not os.path.exists(as_builts_dir):
                 st.warning(f"Please create an `{as_builts_dir}` folder in your main directory.")
             else:
-                # 3. Scan the folder for any images starting with the job number
-                found_images = []
-                for file_name in os.listdir(as_builts_dir):
-                    # Check if it starts with the job number AND is an image
-                    if file_name.startswith(job_num) and file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        found_images.append(os.path.join(as_builts_dir, file_name))
+                # 2. Grab valid locations from your clean telemetry data
+                unique_locations = clean_data['Location'].dropna().unique()
+                valid_locations = [loc for loc in unique_locations if str(loc).strip().upper() != 'UNASSIGNED']
+                sorted_locations = sorted(valid_locations, key=natural_sort_key)
                 
-                # 4. Sort the files so they appear in order (using your existing natural_sort_key function!)
-                found_images = sorted(found_images, key=natural_sort_key)
-                
-                # 5. Display the images or a fallback message
-                if found_images:
-                    for img_path in found_images:
-                        st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-                        st.markdown("---") # Adds a nice line between multiple images
+                if not sorted_locations:
+                    st.warning("No valid locations found for this project context.")
                 else:
-                    st.info(f"No as-built images found for Job {job_num}. Add them to the `{as_builts_dir}` folder using the naming convention (e.g., {job_num}.jpg).")
+                    # Let the user choose which location to highlight on the map
+                    selected_loc_map = st.selectbox("🎯 Select Location to Highlight on As-Built Map:", sorted_locations, key="time_vs_temp_map_sel")
+                    
+                    # 3. Pull coordinates from your new TempPipeLoc table in BigQuery
+                    try:
+                        map_query = f"""
+                            SELECT Project, Location, Map_X, Map_Y 
+                            FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+                            WHERE CAST(Project AS STRING) = '{job_num}'
+                        """
+                        df_temp_pipe_loc = sidebar_client.query(map_query).to_dataframe()
+                    except Exception as e:
+                        df_temp_pipe_loc = pd.DataFrame()
+                        st.caption(f"Could not load coordinate table: {e}")
+                    
+                    # 4. Split screen layout: Context info on left, cropped map on right (or vice versa)
+                    col_info, col_map = st.columns([1, 2])
+                    
+                    with col_info:
+                        st.markdown(f"### Location: `{selected_loc_map}`")
+                        st.write(f"Showing cropped site plan view for job **{job_num}** centered on physical coordinate target `{selected_loc_map}`.")
+                        
+                        # Check if coordinates exist for this specific location
+                        loc_match = df_temp_pipe_loc[(df_temp_pipe_loc['Location'].astype(str) == str(selected_loc_map))]
+                        if not loc_match.empty:
+                            mx, my = loc_match.iloc[0]['Map_X'], loc_match.iloc[0]['Map_Y']
+                            st.success(f"✅ Mapped Coordinates Found:\n- **X:** {mx}\n- **Y:** {my}")
+                        else:
+                            st.warning(f"⚠️ `{selected_loc_map}` has not been mapped yet. Use the Admin Tools tab to log its X/Y coordinates.")
+                    
+                    with col_map:
+                        # Call your cropped map builder function
+                        site_map_fig = build_cropped_site_map(
+                            project_id=job_num, 
+                            location_name=selected_loc_map, 
+                            df_map=df_temp_pipe_loc,
+                            as_built_dir=as_builts_dir
+                        )
+                        
+                        if site_map_fig:
+                            st.plotly_chart(site_map_fig, use_container_width=True)
+                        else:
+                            st.info(f"🗺️ As-built image file or coordinates missing for Job {job_num}.")
+                            
+                st.markdown("---")
+                
+                # 5. Optional: Show full uncropped site maps underneath for reference
+                with st.expander("📂 View Full Uncropped Site Plan Images"):
+                    found_images = sorted([
+                        os.path.join(as_builts_dir, f) for f in os.listdir(as_builts_dir) 
+                        if f.startswith(job_num) and f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                    ], key=natural_sort_key)
+                    
+                    if found_images:
+                        for img_path in found_images:
+                            st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
+                    else:
+                        st.info(f"No full-scale images found for Job {job_num}.")
 
     elif page == "Depth Charts":
         render_depth_charts(selected_project, unit_label, display_tz)
