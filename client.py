@@ -6,6 +6,7 @@ import os
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
+from PIL import Image  # <-- NEW: Required for processing map images
 
 # ===============================================================
 # 1. DYNAMIC TARGET CONFIGURATION
@@ -144,6 +145,81 @@ def get_universal_portal_data(target_job_number):
     
     return df.sort_values('timestamp')
 
+# --- MAP FUNCTION ---
+def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts"):
+    """
+    Generates a dynamically cropped Plotly map centered on a specific pipe location.
+    Handles multiple images per project based on the Image_Name column.
+    """
+    if df_map is None or df_map.empty or 'Project' not in df_map.columns:
+        return None
+        
+    # 1. Filter the TempPipeLoc dataframe for the specific project and location
+    pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
+    
+    if pipe_data.empty:
+        return None
+        
+    pipe_x = float(pipe_data.iloc[0]['Map_X'])
+    pipe_y = float(pipe_data.iloc[0]['Map_Y'])
+
+    # 2. Determine which image file to use
+    if not os.path.exists(as_built_dir):
+        return None
+
+    target_filename = None
+    # Check if the Image_Name column exists and has a value for this pipe
+    if 'Image_Name' in pipe_data.columns and pd.notnull(pipe_data.iloc[0]['Image_Name']):
+        target_filename = str(pipe_data.iloc[0]['Image_Name']).strip()
+
+    if target_filename:
+        # Pull the exact image specified in the Google Sheet
+        img_path = os.path.join(as_built_dir, target_filename)
+        if not os.path.exists(img_path):
+            return None 
+    else:
+        # FALLBACK: If no image is specified in the sheet, just grab the first one that matches the ID
+        available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if not available_files:
+            return None
+        img_path = os.path.join(as_built_dir, available_files[0])
+        
+    img = Image.open(img_path)
+
+    # 3. Build the Plotly Figure
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=[pipe_x], 
+        y=[pipe_y],
+        mode='markers', 
+        name=location_name,
+        marker=dict(
+            size=27, 
+            color='rgba(0,0,0,0)', 
+            line=dict(width=2, color='red') 
+        ),
+        hoverinfo='none'
+    ))
+
+    fig.update_layout(
+        images=[dict(
+            source=img,
+            xref="x", yref="y",
+            x=0, y=0,  
+            sizex=img.width, sizey=img.height,
+            sizing="stretch",
+            opacity=0.9,
+            layer="below"
+        )],
+        xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
+        margin=dict(l=0, r=0, t=0, b=0), 
+        showlegend=False,
+        height=400 
+    )
+    
+    return fig
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
@@ -650,6 +726,19 @@ def render_client_portal():
         raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
         locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
         
+        # --- NEW: Fetch all map coordinates ONCE before the loop for speed ---
+        try:
+            map_query = f"""
+                SELECT Project, Location, Map_X, Map_Y, Image_Name 
+                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+                WHERE CAST(Project AS STRING) = '{root_job_id}'
+            """
+            df_all_locs = client.query(map_query).to_dataframe()
+        except Exception as e:
+            df_all_locs = pd.DataFrame()
+            st.error(f"⚠️ BigQuery Table Error: {e}")
+        # ---------------------------------------------------------------------
+
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
@@ -682,23 +771,66 @@ def render_client_portal():
                 
                 graph_curve_id = None if is_brine_pipe else f"{selected_phase}-{loc}"
                 target_ambient = ambient_df if is_brine_pipe else None
+
+                # Check if this specific location exists in the TempPipeLoc dataframe
+                has_map = False
+                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                    has_map = str(loc) in df_all_locs['Location'].astype(str).values
                 
-                st.plotly_chart(build_high_speed_graph(
-                    loc_data, 
-                    f"{loc} History", 
-                    loc_start_view, 
-                    loc_last_data_ts + timedelta(hours=2), 
-                    "Fahrenheit", 
-                    "°F", 
-                    local_tz, 
-                    loc_f_start_date, 
-                    graph_curve_id,
-                    target_ambient,
-                    selected_phase,
-                    show_theoretical=show_theoretical,
-                    show_ambient=show_ambient,
-                    show_elevation=show_elevation
-                ), use_container_width=True)
+                # --- APPLY SPLIT LAYOUT OR FULL GRAPH ---
+                if has_map and show_as_built:
+                    col_chart, col_map = st.columns([3, 1])
+
+                    with col_chart:
+                        fig = build_high_speed_graph(
+                            df=loc_data, 
+                            title=f"{loc} History", 
+                            start_view=loc_start_view, 
+                            end_view=loc_last_data_ts + timedelta(hours=2), 
+                            unit_mode="Fahrenheit", 
+                            unit_label="°F", 
+                            display_tz=local_tz, 
+                            f_start_date=loc_f_start_date, 
+                            curve_id=graph_curve_id,
+                            ambient_df=target_ambient,
+                            target_phase=selected_phase,
+                            show_theoretical=show_theoretical,
+                            show_ambient=show_ambient,
+                            show_elevation=show_elevation
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with col_map:
+                        site_map_fig = build_cropped_site_map(
+                            project_id=root_job_id, 
+                            location_name=loc, 
+                            df_map=df_all_locs,
+                            as_built_dir="as_builts"
+                        )
+                        if site_map_fig:
+                            st.plotly_chart(site_map_fig, use_container_width=True)
+                        else:
+                            st.info(f"🗺️ Map image for {root_job_id} not found in the as_builts folder.")
+                
+                else:
+                    # Full width layout if map toggle is off or coordinates don't exist
+                    fig = build_high_speed_graph(
+                        df=loc_data, 
+                        title=f"{loc} History", 
+                        start_view=loc_start_view, 
+                        end_view=loc_last_data_ts + timedelta(hours=2), 
+                        unit_mode="Fahrenheit", 
+                        unit_label="°F", 
+                        display_tz=local_tz, 
+                        f_start_date=loc_f_start_date, 
+                        curve_id=graph_curve_id,
+                        ambient_df=target_ambient,
+                        target_phase=selected_phase,
+                        show_theoretical=show_theoretical,
+                        show_ambient=show_ambient,
+                        show_elevation=show_elevation
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz)
@@ -706,7 +838,7 @@ def render_client_portal():
     with tabs[3]:
         st.subheader("📋 24-Hour Pipe Summary Table")
         render_pipe_summary_table(full_p_df, "°F", local_tz)
-       
+        
     with tabs[4]:
         if show_as_built:
             asbuilt_raw = primary_meta.get('AsBuiltFile')
