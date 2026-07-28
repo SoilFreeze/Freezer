@@ -81,16 +81,16 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     # 3. Build the Plotly Figure
     fig = go.Figure()
 
-    # Add the hollow circle for the specific pipe location
+    # Add the thinner, 1.5x hollow circle for the specific pipe location
     fig.add_trace(go.Scatter(
         x=[pipe_x], 
         y=[pipe_y],
-        mode='markers', # Removed the text mode
+        mode='markers', 
         name=location_name,
         marker=dict(
-            size=54, # Tripled the size (was 18)
-            color='rgba(0,0,0,0)', # Makes the inside of the circle completely transparent
-            line=dict(width=4, color='red') # The hollow outer ring
+            size=27, # 1.5x the size of the original dot
+            color='rgba(0,0,0,0)', # Completely transparent inside
+            line=dict(width=2, color='red') # Thinner, sharper outline
         ),
         hoverinfo='none'
     ))
@@ -100,14 +100,12 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
         images=[dict(
             source=img,
             xref="x", yref="y",
-            x=0, y=0,  # <-- THE FIX: Anchor the image to the top-left (0,0) to match pixel coordinates
+            x=0, y=0,  
             sizex=img.width, sizey=img.height,
             sizing="stretch",
             opacity=0.9,
             layer="below"
         )],
-        # Lock the view to a 600x600 pixel window centered directly on the pipe. 
-        # The inverted y-axis [bottom, top] forces Plotly to match image coordinates.
         xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
         yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
         margin=dict(l=0, r=0, t=0, b=0), 
@@ -280,7 +278,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             gap_rows['temperature'] = float('nan')
             s_df = pd.concat([s_df, gap_rows]).sort_values('timestamp')
         
-        # --- THE FIX STARTS HERE ---
+       # --- THE FIX STARTS HERE ---
         # 1. We create a copy of the temperatures for the main line
         clean_y = s_df['temperature'].copy()
         
@@ -290,19 +288,19 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             bad_data_mask = s_status.isin(['MASKED', 'BADDATA', 'OFFICE'])
             clean_y.loc[bad_data_mask] = float('nan')
         
-        # Add the hollow circle for the specific pipe location
+        # 3. Draw the main line using the 'clean_y' (which has holes where the masked data is)
         fig.add_trace(go.Scatter(
-            x=[pipe_x], 
-            y=[pipe_y],
-            mode='markers', 
-            name=location_name,
-            marker=dict(
-                size=27, # 1.5x the size of the original red dot
-                color='rgba(0,0,0,0)', 
-                line=dict(width=2, color='red') # Thinner, sharper outline
-            ),
-            hoverinfo='none'
+            x=s_df['timestamp'], 
+            y=clean_y, # <-- USING THE NULLIFIED DATA HERE
+            name=display_name, 
+            mode='lines+markers',
+            marker=dict(size=3),
+            connectgaps=False, 
+            customdata=s_df[['NodeNum']], 
+            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
+            hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
         ))
+        
         
         # 4. Draw the isolated warning markers using the original un-nullified temperature
         if 'approval_status' in s_df.columns:
