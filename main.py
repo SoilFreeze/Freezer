@@ -6,7 +6,7 @@ import re
 from app.utils import config
 from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
 from app.components.charts import build_high_speed_graph
-
+from app.utils.config import PROJECT_ID, DATASET_ID
 # =============================================================================
 # IMPORTANT: Import your other page functions here based on your file structure
 # Example paths provided below, adjust as needed!
