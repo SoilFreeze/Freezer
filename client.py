@@ -835,8 +835,23 @@ def render_client_portal():
         if show_as_built:
             asbuilt_raw = primary_meta.get('AsBuiltFile')
             if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
-                asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
+                all_asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
                 
+                # --- NEW: Filter files for the specific phase ---
+                asbuilt_filenames = all_asbuilt_filenames
+                if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
+                    # Extract the pure phase number (e.g., "Phase 2" -> "2")
+                    phase_num = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
+                    target_prefix = f"{root_job_id}-{phase_num}-"
+                    
+                    # Keep files that match the specific phase naming logic (e.g., "2541-2-")
+                    phase_specific_files = [f for f in all_asbuilt_filenames if f.startswith(target_prefix) or target_prefix in f]
+                    
+                    # If matches are found, display only those. (If none match, gracefully fall back to showing all).
+                    if phase_specific_files:
+                        asbuilt_filenames = phase_specific_files
+                # ------------------------------------------------
+
                 if not asbuilt_filenames:
                      st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
                 else:
@@ -860,6 +875,5 @@ def render_client_portal():
                             st.error(f"❌ Drawing Not Found: '{filename}' in the as_builts folder.")
             else:
                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-
 # --- EXECUTION ---
 render_client_portal()
