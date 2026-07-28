@@ -23,7 +23,14 @@ else:
 # 2. PAGE CONFIG MUST BE THE VERY FIRST STREAMLIT COMMAND
 page_title = f"SoilFreeze Portal #{TARGET_JOB_NUMBER}" if TARGET_JOB_NUMBER else "SoilFreeze Client Portal"
 st.set_page_config(page_title=page_title, layout="wide")
-st.markdown("""<style> [data-testid="stSidebarNav"] {display: none;} </style>""", unsafe_allow_html=True)
+
+# Completely hide the default Streamlit sidebar and navigation elements
+st.markdown("""
+    <style> 
+        [data-testid="stSidebarNav"] {display: none;} 
+        [data-testid="collapsedControl"] {display: none;}
+    </style>
+""", unsafe_allow_html=True)
 
 # 3. If STILL no job number is found, show the manual entry screen
 if not TARGET_JOB_NUMBER:
@@ -116,25 +123,20 @@ def get_universal_portal_data(target_job_number):
     
     # 3. Process Time Boundaries safely using Pandas
     if not reg_df.empty:
-        # Force Project columns to be strings and strip whitespace to prevent merge failures
         df['Project'] = df['Project'].astype(str).str.strip()
         reg_df['Project'] = reg_df['Project'].astype(str).str.strip()
         
-        # Pandas effortlessly absorbs ANY date format coming from Google Sheets
         reg_df['Start_Date'] = pd.to_datetime(reg_df['Start_Date'], errors='coerce', utc=True)
         reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce', utc=True)
         
-        # Merge exactly on Project, Node, AND Location to prevent Cartesian cloning (e.g., TP-0142 at T8 vs T17)
         df = df.merge(reg_df[['Project', 'NodeNum', 'Location', 'Start_Date', 'End_Date']], 
                       on=['Project', 'NodeNum', 'Location'], 
                       how='left')
         
-        # Apply historical boundary filters
         df = df[df['Start_Date'].isna() | (df['timestamp'] >= df['Start_Date'])]
         df = df[df['End_Date'].isna() | (df['timestamp'] <= df['End_Date'])]
     
     # 4. Generate the 24-hour gap evaluation
-    # Keeps data clean by explicitly terminating the line if a sensor goes offline for >24 hours
     df = df.sort_values(by=['NodeNum', 'Location', 'Depth', 'Bank', 'timestamp'])
     df['prev_timestamp'] = df.groupby(['NodeNum', 'Location', 'Depth', 'Bank'])['timestamp'].shift(1)
     
@@ -162,12 +164,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     final_end_view, final_start_view = end_view, start_view
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # --- INJECT THEORETICAL CURVE (Linked to UI Toggle) ---
+    # --- INJECT THEORETICAL CURVE ---
     if show_theoretical and curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            
-            # 🛡️ Extract just the numbers from the location (e.g., "T1" -> "1")
             digits = re.findall(r'\d+', loc_part)
             loc_digit = digits[0] if digits else loc_part
             target_phase_str = target_phase if target_phase else TARGET_JOB_NUMBER
@@ -176,9 +176,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 SELECT CurveID, Day, Temp 
                 FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
                 WHERE UPPER(CurveID) LIKE UPPER('%{target_phase_str}%') 
-                -- 🎯 EXACT MATCH: Forces a non-numeric boundary after the number so T1 doesn't match T11
                 AND REGEXP_CONTAINS(UPPER(CurveID), r'(?i)T[P]?0?{loc_digit}([^0-9]|$)')
-                -- 🚫 BRINE EXCLUSION: Database-level block to keep curves off Brine charts
                 AND NOT REGEXP_CONTAINS(UPPER(CurveID), r'(?i)BRINE')
                 ORDER BY Day
             """
@@ -211,7 +209,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
 
-    # Secondary cleaning filter step to make sure no loose office/desk items survive
     plot_df = plot_df[
         (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
         (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
@@ -237,11 +234,9 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
         if pos_df.empty: continue
         
-        # 🛡️ SPLIT BY SENSOR: Draw a separate line for every unique sensor that lived at this position
         for node_id in pos_df['NodeNum'].unique():
             node_pos_df = pos_df[pos_df['NodeNum'] == node_id].copy()
             
-            # ⏱️ 24-HOUR CHART GAP BUILDER
             node_pos_df = node_pos_df.sort_values('timestamp').reset_index(drop=True)
             time_deltas = node_pos_df['timestamp'].diff()
             gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
@@ -252,7 +247,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                     gap_row = node_pos_df.loc[idx].copy()
                     prev_ts = node_pos_df.loc[idx - 1]['timestamp']
                     gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                    gap_row['temperature'] = None  # None kills the connecting segment trace
+                    gap_row['temperature'] = None 
                     inserted_gaps.append(gap_row)
                 
                 node_pos_df = pd.concat([node_pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
@@ -263,24 +258,20 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 x=node_pos_df['timestamp'], y=node_pos_df['temperature'], 
                 name=display_name, 
                 mode='lines',
-                connectgaps=False,  # Enforces physical segment termination at None rows
+                connectgaps=False, 
                 line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
                 showlegend=True,
                 hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
                 text=node_pos_df['NodeNum']
             ))
 
-    # --- INJECT AMBIENT DATA (Linked to UI Toggle) ---
+    # --- INJECT AMBIENT DATA ---
     if show_ambient and ambient_df is not None and not ambient_df.empty:
         amb_plot_df = ambient_df.copy()
-        
-        # ⏱️ TIMEZONE FIX: Aligns ambient data with the local time of the current graph
         amb_plot_df['timestamp'] = ensure_tz_convert(amb_plot_df['timestamp'], display_tz)
         
         for sn in amb_plot_df['NodeNum'].unique():
             a_df = amb_plot_df[amb_plot_df['NodeNum'] == sn].sort_values('timestamp')
-            
-            # 🛡️ VISUAL FIX: Limit ambient trace to the exact view window of the current graph
             a_df = a_df[(a_df['timestamp'] >= final_start_view) & (a_df['timestamp'] <= final_end_view)]
             
             if not a_df.empty:
@@ -321,7 +312,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 # --- UI TABS ---
 
 def render_summary_tab(full_p_df, unit_label, local_tz):
-    """Renders the 24 hour Thermal Summary split across 4 structural groups."""
     st.subheader("🌐 24 hour Thermal Summary")
     
     df_local = full_p_df.copy()
@@ -333,7 +323,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
         
         if any(x in loc or x in bank for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']): 
             return 'Ambient'
-            
         if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
         if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
         return 'Temp Pipes (TP)'
@@ -376,7 +365,6 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
             st.divider()
 
 def render_pipe_summary_table(full_p_df, unit_label, local_tz):
-    """Renders a granular Current vs 24-hour Extremes Summary for each individual pipe/location."""
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
@@ -391,7 +379,6 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
     locations = sorted(df_local['Location'].unique(), key=natural_sort_key)
     
     for loc in locations:
-        # Skip Ambient for the granular pipe summary 
         if 'AMBIENT' in str(loc).upper(): continue
         
         loc_df = df_local[df_local['Location'] == loc]
@@ -399,7 +386,6 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
         
         if loc_24h.empty: continue
         
-        # 1. Calculate Current Extremes from the absolute latest reading of each active node
         latest_nodes = loc_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
         
         if not latest_nodes.empty:
@@ -414,14 +400,9 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
         else:
             c_high_temp, c_high_node, c_low_temp, c_low_node = None, "N/A", None, "N/A"
         
-        # 2. Find 24h Extremes across the entire trailing window
         max_row = loc_24h.loc[loc_24h['temperature'].idxmax()]
         min_row = loc_24h.loc[loc_24h['temperature'].idxmin()]
         
-        h24_temp, h24_node = max_row['temperature'], max_row['NodeNum']
-        l24_temp, l24_node = min_row['temperature'], min_row['NodeNum']
-        
-        # Helper to neatly format the temperature and node ID
         def fmt_temp_node(t, n):
             if pd.isnull(t): return "N/A"
             return f"{t:.1f}{unit_label} ({n})"
@@ -435,18 +416,16 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
     st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
-    """Engineering-grade Vertical Temperature Profiles matching your Dashboard."""
     st.subheader("📏 Vertical Temperature Profile")
 
-    st.sidebar.subheader("📐 Profile Settings")
-    lookback_weeks = st.sidebar.slider("Historical Snapshots (Weeks)", 1, 24, 8, key="depth_lookback")
+    # Hardcoded exactly to 6 weeks matching client lockdown requirements
+    lookback_weeks = 6 
 
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
     depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
 
-    # Post-extraction sanity pass to keep out any test configurations that slipped through
     depth_df = depth_df[
         (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
         (~depth_df['Location'].str.upper().str.contains('DESK')) &
@@ -467,7 +446,6 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
-            # --- A. BASELINE CALCULATIONS ---
             baseline_ts = loc_data['timestamp'].min()
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -492,7 +470,6 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                     hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
 
-            # --- B. WEEKLY SNAPSHOT CALCULATIONS ---
             for m_date in mondays:
                 target_ts = m_date.replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
@@ -549,7 +526,6 @@ def render_client_portal():
     client = get_bq_client()
     if client is None: return
 
-    # 🔥 Fix: Isolate the root job ID rigorously to pull accurate phases.
     root_job_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
     proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = '{root_job_id}'"
     proj_registry = client.query(proj_q).to_dataframe()
@@ -557,11 +533,8 @@ def render_client_portal():
     if proj_registry.empty:
         st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
         return
-
-    # --- 🎛️ PHASE SELECTOR UI (BUILT FROM ACTUAL DATA) ---
     
     with st.spinner("Synchronizing official records..."):
-        # 1. Fetch data for all phases FIRST so we know exactly what Project IDs exist
         master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
 
     if master_df.empty:
@@ -575,84 +548,65 @@ def render_client_portal():
         (~master_df['Location'].str.upper().str.contains('TEST'))
     ]
 
-    # 2. Build the dropdown from the official Project Registry so ALL phases show up
     proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
     master_df['Project'] = master_df['Project'].astype(str).str.strip()
     
     available_phases = sorted(proj_registry['Project'].dropna().unique(), key=natural_sort_key)
     
+    # --- PHASE SELECTOR (Moved from Sidebar to Main Body) ---
+    st.markdown("<br>", unsafe_allow_html=True)
     if len(available_phases) > 1:
-        st.sidebar.markdown("### 📂 Project Phase")
-        selected_phase = st.sidebar.selectbox("Select Phase/System:", available_phases)
+        selected_phase = st.selectbox("📂 **Select Project Phase:**", available_phases)
+        st.markdown("<hr>", unsafe_allow_html=True)
     elif len(available_phases) == 1:
         selected_phase = available_phases[0]
     else:
         st.error("No valid phases found in the data.")
         return
 
-    # --- NEW VISUALIZATION CONTROLS ---
-    st.sidebar.markdown("### ⚙️ Visualization Options")
-    show_theoretical = st.sidebar.checkbox("Show Theoretical Curves", value=True)
-    show_ambient = st.sidebar.checkbox("Show Ambient Temp", value=True)
-    show_elevation = st.sidebar.checkbox("Show Elevation", value=False)
-    show_as_built = st.sidebar.checkbox("Show As-Built Maps", value=True)
+    # Default toggles are hardcoded on for clients
+    show_theoretical = True
+    show_ambient = True
+    show_elevation = False
+    show_as_built = True
 
-    # --- NEW TIMELINE NAVIGATION ---
-    st.sidebar.markdown("### ⏱️ Timeline Navigation")
-    timeline_mode = st.sidebar.radio("View Mode:", ["6 Weeks Default", "Custom Range", "Entire Project"])
-    
-    if timeline_mode == "Custom Range":
-        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 24, 6)
-    elif timeline_mode == "6 Weeks Default":
-        weeks_view = 6
-    else:
-        weeks_view = None  # None equates to viewing the entire project history
+    # Force 6 week view
+    weeks_view = 6
 
-    # 3. Isolate data exclusively for the chosen phase
     target_phase_clean = str(selected_phase).strip()
     full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
 
-    # 🛠️ SMART ID TRANSLATOR v3: Base Project Matcher
-    # Connects phase-specific registry names (e.g., "2541-Blackjack Phase 2") 
-    # to the master telemetry ID (e.g., "2541-Blackjack")
     if full_p_df.empty:
         available_telemetry_projects = master_df['Project'].astype(str).str.strip().dropna().unique()
         
         for telemetry_proj in available_telemetry_projects:
-            # If the telemetry ID is a base string of the dropdown phase (or vice versa), link them!
             if telemetry_proj in target_phase_clean or target_phase_clean in telemetry_proj:
                 full_p_df = master_df[master_df['Project'] == telemetry_proj].copy()
                 break
                 
-        # Absolute fallback: just show all data matching the root job number to prevent a blank screen
         if full_p_df.empty:
             root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
             full_p_df = master_df[master_df['Project'].str.startswith(root_id, na=False)].copy()
 
-    # --- ☁️ AMBIENT WEATHER SHARING FIX ---
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
     ambient_data_global = master_df[ambient_mask_master].copy()
     
-    # Safely check if ambient data exists in the current phase before merging
     if not full_p_df.empty:
         ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
         if not ambient_data_global.empty and not ambient_mask_phase.any():
             full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
             
-    # 🚨 DIAGNOSTIC SAFETY NET 
     if full_p_df.empty:
         st.error(f"❌ **Data Mismatch Detected!**")
         st.warning(f"The dropdown is looking for phase: `{target_phase_clean}`")
         st.info("But the telemetry database only contains the following Project IDs:")
         st.write(master_df['Project'].unique())
-        st.stop() # Halts the script so you can see the error clearly
+        st.stop() 
 
-    # 4. Isolate metadata for UI (Fallback gracefully if data naming doesn't perfectly match registry)
     proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
     phase_row = proj_registry[proj_registry['Project'] == target_phase_clean]
     
     if phase_row.empty:
-        # Fallback: Just grab the first registry entry that shares the root job ID
         phase_row = proj_registry.iloc[[0]]
 
     primary_meta = phase_row.iloc[0].to_dict()
@@ -689,11 +643,9 @@ def render_client_portal():
         render_summary_tab(full_p_df, "°F", local_tz)
 
     with tabs[1]:
-        # ☁️ ISOLATE AMBIENT DATA LOCALLY (now guaranteed to exist if the site has an ambient sensor)
         ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
         ambient_df = full_p_df[ambient_mask].copy()
         
-        # Filter locations to remove ambient from creating its own expander tab
         raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
         locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
         
@@ -702,36 +654,24 @@ def render_client_portal():
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
                 
                 matched_project_id = loc_data['Project'].iloc[0]
-                
-                # Fetch phase info specifically for this data split
                 current_phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 loc_f_start_date = f_start_date
                 
-                # Dynamic Timeline Span Logic
                 if not current_phase_row.empty:
                     raw_phase_fd = current_phase_row.iloc[0].get('Date_Freezedown')
                     if pd.notnull(raw_phase_fd):
                         loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
                         
-                # If Entire Project mode is selected (None), set start view to baseline / freeze start
-                if weeks_view is None:
-                    if loc_f_start_date:
-                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
-                    else:
-                        loc_start_view = ensure_tz_convert(loc_data['timestamp'], local_tz).min()
-                else:
-                    # Cut exactly N weeks from the latest reading
-                    loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
-                    
-                    # Prevent custom slider from going into blank space before the project began
-                    if loc_f_start_date:
-                        project_start = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
-                        if loc_start_view < project_start:
-                            loc_start_view = project_start
+                # Hardcoded exact 6-week window lookup
+                loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
-                # 🛡️ STRICT BRINE CHECK
+                if loc_f_start_date:
+                    project_start = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
+                    if loc_start_view < project_start:
+                        loc_start_view = project_start
+                
                 loc_upper = str(loc).upper().strip()
                 is_brine_pipe = (
                     loc_upper.startswith('S') or 
@@ -740,11 +680,8 @@ def render_client_portal():
                 )
                 
                 graph_curve_id = None if is_brine_pipe else f"{selected_phase}-{loc}"
-                
-                # 🎯 TARGETED INJECTION: Pass ambient_df to Brine graphs, ignore for Temp Pipes
                 target_ambient = ambient_df if is_brine_pipe else None
                 
-                # Passing the new sidebar UI flags into the chart builder
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
                     f"{loc} History", 
@@ -770,7 +707,6 @@ def render_client_portal():
         render_pipe_summary_table(full_p_df, "°F", local_tz)
        
     with tabs[4]:
-        # Note: Added simple visibility wrapper for As-Built tab based on user toggle preference
         if show_as_built:
             asbuilt_raw = primary_meta.get('AsBuiltFile')
             if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
@@ -805,8 +741,6 @@ def render_client_portal():
                             st.error(f"❌ Drawing Not Found: '{filename}'")
             else:
                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-        else:
-            st.warning("🗺️ As-Built maps are currently hidden. Enable them in the sidebar View Controls.")
 
 # --- EXECUTION ---
 render_client_portal()
