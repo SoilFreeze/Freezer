@@ -89,7 +89,7 @@ def get_universal_portal_data(target_job_number):
     # 1. Fetch the raw, approved telemetry directly from the master view
     query = f"""
         SELECT 
-            Project, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
+            Project, System, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
         WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
           
@@ -630,16 +630,61 @@ def render_client_portal():
     
     available_phases = sorted(proj_registry['Project'].dropna().unique(), key=natural_sort_key)
     
-    # --- PHASE SELECTOR (Moved from Sidebar to Main Body) ---
+    # ===============================================================
+    # --- DYNAMIC PHASE & SYSTEM FILTERS ---
+    # ===============================================================
     st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 1. PHASE SELECTOR
     if len(available_phases) > 1:
         selected_phase = st.selectbox("📂 **Select Project Phase:**", available_phases)
-        st.markdown("<hr>", unsafe_allow_html=True)
     elif len(available_phases) == 1:
         selected_phase = available_phases[0]
     else:
         st.error("No valid phases found in the data.")
         return
+
+    # Slice the data to the target phase first
+    target_phase_clean = str(selected_phase).strip()
+    full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
+
+    # --- Fallback Project Matching (Kept from your original code) ---
+    if full_p_df.empty:
+        available_telemetry_projects = master_df['Project'].astype(str).str.strip().dropna().unique()
+        for telemetry_proj in available_telemetry_projects:
+            if telemetry_proj in target_phase_clean or target_phase_clean in telemetry_proj:
+                full_p_df = master_df[master_df['Project'] == telemetry_proj].copy()
+                break
+                
+        if full_p_df.empty:
+            root_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
+            full_p_df = master_df[master_df['Project'].str.startswith(root_id, na=False)].copy()
+
+    # 2. SYSTEM SELECTOR
+    available_systems = []
+    if not full_p_df.empty and 'System' in full_p_df.columns:
+        # Extract unique systems for this specific phase
+        available_systems = sorted(
+            [str(s) for s in full_p_df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], 
+            key=natural_sort_key
+        )
+        
+        # Only show the System dropdown if there are 2 or more systems
+        if len(available_systems) > 1:
+            selected_systems = st.multiselect(
+                "⚙️ **Filter by System:** (Leave blank to view all systems)", 
+                options=available_systems, 
+                default=[]  
+            )
+            
+            # Slice the dataframe again if the client picked specific systems
+            if selected_systems:
+                full_p_df = full_p_df[full_p_df['System'].astype(str).isin(selected_systems)]
+
+    # Draw a horizontal line ONLY if at least one of the UI menus was displayed to the user
+    if len(available_phases) > 1 or len(available_systems) > 1:
+        st.markdown("<hr>", unsafe_allow_html=True)
+    # ===============================================================
 
     # Default toggles are hardcoded on for clients
     show_theoretical = True
