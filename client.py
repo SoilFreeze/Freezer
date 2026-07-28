@@ -6,13 +6,12 @@ import os
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime, timedelta
-from PIL import Image  # <-- NEW: Required for processing map images
+from PIL import Image
 
 # ===============================================================
 # 1. DYNAMIC TARGET CONFIGURATION
 # ===============================================================
 
-# 1. Fetch from secrets or URL FIRST (No visual Streamlit commands yet!)
 TARGET_JOB_NUMBER = None
 if "JOB_NUMBER" in st.secrets:
     TARGET_JOB_NUMBER = str(st.secrets["JOB_NUMBER"])
@@ -21,11 +20,9 @@ elif "job_number" in st.secrets:
 else:
     TARGET_JOB_NUMBER = st.query_params.get("job", None)
 
-# 2. PAGE CONFIG MUST BE THE VERY FIRST STREAMLIT COMMAND
 page_title = f"SoilFreeze Portal #{TARGET_JOB_NUMBER}" if TARGET_JOB_NUMBER else "SoilFreeze Client Portal"
 st.set_page_config(page_title=page_title, layout="wide")
 
-# Completely hide the default Streamlit sidebar and navigation elements
 st.markdown("""
     <style> 
         [data-testid="stSidebarNav"] {display: none;} 
@@ -33,7 +30,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 3. If STILL no job number is found, show the manual entry screen
 if not TARGET_JOB_NUMBER:
     st.title("🌐 SoilFreeze Client Portal")
     st.info("Please enter your assigned Job Number to view project telemetry.")
@@ -41,9 +37,8 @@ if not TARGET_JOB_NUMBER:
     manual_job = st.text_input("Job Number:", placeholder="e.g., 2527")
     
     if not manual_job:
-        st.stop()  # 🛑 Halts script execution here until a number is entered
+        st.stop()
         
-    # Once they hit enter, update the URL and rerun the script from the top
     st.query_params["job"] = str(manual_job)
     st.rerun()
 
@@ -51,7 +46,6 @@ if not TARGET_JOB_NUMBER:
 PROJECT_ID = "sensorpush-export"
 DATASET_ID = "Temperature" 
 
-# Migration Targets for Google Sheets / Native Table Migration Phase
 PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_synced"
 
@@ -76,7 +70,6 @@ def ensure_tz_convert(series, target_tz):
     return series.dt.tz_convert(target_tz)
 
 def natural_sort_key(s):
-    """Splits text and numbers to allow natural sorting (e.g., T1, T2, T3 instead of T1, T10)."""
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 @st.cache_data(ttl=600)
@@ -86,25 +79,17 @@ def get_universal_portal_data(target_job_number):
     
     root_job_id = str(target_job_number).split('-')[0].strip()
     
-    # 1. Fetch the raw, approved telemetry directly from the master view
     query = f"""
         SELECT 
             Project, Phase, System, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
         FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
         WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
-          
-          -- 🔒 STRICT ALLOWLIST
           AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
-          
-          -- 🎛️ RETIREMENT FILTER
           AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-          
-          -- 🚫 EXCLUSION RULES
           AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
           AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
           AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
           AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
-          
           AND temperature >= -30.0 AND temperature <= 120.0
     """
     job_config = bigquery.QueryJobConfig(
@@ -114,7 +99,6 @@ def get_universal_portal_data(target_job_number):
     
     if df.empty: return pd.DataFrame()
     
-    # 2. Pull the Registry Dates
     reg_q = f"""
         SELECT Project, NodeNum, Location, Start_Date, End_Date 
         FROM `{NODE_REGISTRY_TABLE}` 
@@ -122,7 +106,6 @@ def get_universal_portal_data(target_job_number):
     """
     reg_df = client.query(reg_q, job_config=job_config).to_dataframe()
     
-    # 3. Process Time Boundaries safely using Pandas
     if not reg_df.empty:
         df['Project'] = df['Project'].astype(str).str.strip()
         reg_df['Project'] = reg_df['Project'].astype(str).str.strip()
@@ -137,24 +120,17 @@ def get_universal_portal_data(target_job_number):
         df = df[df['Start_Date'].isna() | (df['timestamp'] >= df['Start_Date'])]
         df = df[df['End_Date'].isna() | (df['timestamp'] <= df['End_Date'])]
     
-    # 4. Generate the 24-hour gap evaluation
     df = df.sort_values(by=['NodeNum', 'Location', 'Depth', 'Bank', 'timestamp'])
     df['prev_timestamp'] = df.groupby(['NodeNum', 'Location', 'Depth', 'Bank'])['timestamp'].shift(1)
-    
     df = df[df['prev_timestamp'].isna() | ((df['timestamp'] - df['prev_timestamp']).dt.total_seconds() / 3600 <= 24)]
     
     return df.sort_values('timestamp')
 
 # --- MAP FUNCTION ---
 def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts"):
-    """
-    Generates a dynamically cropped Plotly map centered on a specific pipe location.
-    Handles multiple images per project based on the Image_Name column.
-    """
     if df_map is None or df_map.empty or 'Project' not in df_map.columns:
         return None
         
-    # 1. Filter the TempPipeLoc dataframe for the specific project and location
     pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
     
     if pipe_data.empty:
@@ -163,22 +139,18 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     pipe_x = float(pipe_data.iloc[0]['Map_X'])
     pipe_y = float(pipe_data.iloc[0]['Map_Y'])
 
-    # 2. Determine which image file to use
     if not os.path.exists(as_built_dir):
         return None
 
     target_filename = None
-    # Check if the Image_Name column exists and has a value for this pipe
     if 'Image_Name' in pipe_data.columns and pd.notnull(pipe_data.iloc[0]['Image_Name']):
         target_filename = str(pipe_data.iloc[0]['Image_Name']).strip()
 
     if target_filename:
-        # Pull the exact image specified in the Google Sheet
         img_path = os.path.join(as_built_dir, target_filename)
         if not os.path.exists(img_path):
             return None 
     else:
-        # FALLBACK: If no image is specified in the sheet, just grab the first one that matches the ID
         available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         if not available_files:
             return None
@@ -186,43 +158,30 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
         
     img = Image.open(img_path)
 
-    # 3. Build the Plotly Figure
     fig = go.Figure()
-
     fig.add_trace(go.Scatter(
         x=[pipe_x], 
         y=[pipe_y],
         mode='markers', 
         name=location_name,
-        marker=dict(
-            size=27, 
-            color='rgba(0,0,0,0)', 
-            line=dict(width=2, color='red') 
-        ),
+        marker=dict(size=27, color='rgba(0,0,0,0)', line=dict(width=2, color='red')),
         hoverinfo='none'
     ))
 
     fig.update_layout(
         images=[dict(
-            source=img,
-            xref="x", yref="y",
-            x=0, y=0,  
-            sizex=img.width, sizey=img.height,
-            sizing="stretch",
-            opacity=0.9,
-            layer="below"
+            source=img, xref="x", yref="y", x=0, y=0,  
+            sizex=img.width, sizey=img.height, sizing="stretch",
+            opacity=0.9, layer="below"
         )],
         xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
         yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
         margin=dict(l=0, r=0, t=0, b=0), 
-        showlegend=False,
-        height=400 
+        showlegend=False, height=400 
     )
-    
     return fig
 
 # --- THE ENGINEERING GRAPHING ENGINE ---
-
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
                            display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None, target_phase=None,
                            show_theoretical=True, show_ambient=True, show_elevation=False):
@@ -240,7 +199,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     final_end_view, final_start_view = end_view, start_view
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    # --- INJECT THEORETICAL CURVE ---
     if show_theoretical and curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
@@ -284,7 +242,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             return str(loc_val)
 
     plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
-
     plot_df = plot_df[
         (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
         (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
@@ -312,7 +269,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
         
         for node_id in pos_df['NodeNum'].unique():
             node_pos_df = pos_df[pos_df['NodeNum'] == node_id].copy()
-            
             node_pos_df = node_pos_df.sort_values('timestamp').reset_index(drop=True)
             time_deltas = node_pos_df['timestamp'].diff()
             gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
@@ -333,16 +289,13 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
             
             fig.add_trace(go.Scatter(
                 x=node_pos_df['timestamp'], y=node_pos_df['temperature'], 
-                name=display_name, 
-                mode='lines',
-                connectgaps=False, 
+                name=display_name, mode='lines', connectgaps=False, 
                 line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
                 showlegend=True,
                 hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
                 text=node_pos_df['NodeNum']
             ))
 
-    # --- INJECT AMBIENT DATA ---
     if show_ambient and ambient_df is not None and not ambient_df.empty:
         amb_plot_df = ambient_df.copy()
         amb_plot_df['timestamp'] = ensure_tz_convert(amb_plot_df['timestamp'], display_tz)
@@ -387,7 +340,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     return fig
 
 # --- UI TABS ---
-
 def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_registry):
     df_local = master_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -425,10 +377,8 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             
         phase_str = str(phase).strip()
         
-        # --- GET PER-PHASE DATES ---
-        phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict() # default fallback
+        phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict()
         if phase_str != 'Default' and phase_str != 'Unassigned Phase':
-            # Match the specific phase in the registry to get its unique dates
             specific_row = proj_registry[proj_registry['Project'].str.contains(phase_str, case=False, na=False)]
             if not specific_row.empty:
                 phase_meta = specific_row.iloc[0].to_dict()
@@ -442,7 +392,6 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
             start_date_text = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}"
 
-        # Dynamically build the title
         if phase_str.lower() in base_project_name.lower() or base_project_name.lower() in phase_str.lower() or phase_str == 'Default':
             header_title = base_project_name
         else:
@@ -450,7 +399,6 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             
         st.markdown(f"### 📊 {header_title}")
         
-        # Inject the start dates and day count right below the Phase title
         date_c1, date_c2 = st.columns(2)
         with date_c1:
             if day_count_text: st.markdown(day_count_text)
@@ -500,7 +448,6 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
                         high_val = snap_type_df['temperature'].max()
                         low_val = snap_type_df['temperature'].min()
 
-                    # --- COMPACT BUNDLED METRICS CARD ---
                     st.markdown(f"""
                     <div style="background-color: #f8f9fa; padding: 12px; border-radius: 8px; border: 1px solid #e9ecef;">
                         <div style="font-weight: bold; margin-bottom: 8px; font-size: 16px;">{p_type}</div>
@@ -514,7 +461,7 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
                     
             st.markdown("<br>", unsafe_allow_html=True)
         st.divider()
-        
+
 def render_pipe_summary_table(full_p_df, unit_label, local_tz):
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -542,17 +489,12 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
         if not latest_nodes.empty:
             c_max_idx = latest_nodes['temperature'].idxmax()
             c_min_idx = latest_nodes['temperature'].idxmin()
-            
             c_high_temp = latest_nodes.loc[c_max_idx, 'temperature']
             c_high_node = latest_nodes.loc[c_max_idx, 'NodeNum']
-            
             c_low_temp = latest_nodes.loc[c_min_idx, 'temperature']
             c_low_node = latest_nodes.loc[c_min_idx, 'NodeNum']
         else:
             c_high_temp, c_high_node, c_low_temp, c_low_node = None, "N/A", None, "N/A"
-        
-        max_row = loc_24h.loc[loc_24h['temperature'].idxmax()]
-        min_row = loc_24h.loc[loc_24h['temperature'].idxmin()]
         
         def fmt_temp_node(t, n):
             if pd.isnull(t): return "N/A"
@@ -568,8 +510,6 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
 
 def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     st.subheader("📏 Vertical Temperature Profile")
-
-    # Hardcoded exactly to 6 weeks matching client lockdown requirements
     lookback_weeks = 6 
 
     df_local = full_p_df.copy()
@@ -612,12 +552,9 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                     .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
-
                 fig.add_trace(go.Scatter(
-                    x=snap_b['temperature'], y=snap_b['Depth_Num'], 
-                    mode='lines', 
-                    name=f'Baseline ({baseline_date_str})',
-                    line=dict(color='black', width=2.5, dash='dash'),
+                    x=snap_b['temperature'], y=snap_b['Depth_Num'], mode='lines', 
+                    name=f'Baseline ({baseline_date_str})', line=dict(color='black', width=2.5, dash='dash'),
                     hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                 ))
 
@@ -640,25 +577,18 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                         .drop_duplicates('NodeNum')
                         .sort_values('Depth_Num')
                     )
-
                     fig.add_trace(go.Scatter(
-                        x=snap_w['temperature'], y=snap_w['Depth_Num'], 
-                        mode='lines+markers', 
-                        name=current_loop_date,
-                        line=dict(shape='spline', smoothing=1.1, width=1.5),
-                        marker=dict(size=4),
+                        x=snap_w['temperature'], y=snap_w['Depth_Num'], mode='lines+markers', 
+                        name=current_loop_date, line=dict(shape='spline', smoothing=1.1, width=1.5), marker=dict(size=4),
                         hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
                     ))
 
             fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
-
             max_depth = loc_data['Depth_Num'].max()
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
             fig.update_layout(
-                title=f"<b>Temp vs Depth - {loc}</b>",
-                plot_bgcolor='white', 
-                height=800,
+                title=f"<b>Temp vs Depth - {loc}</b>", plot_bgcolor='white', height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", range=[-20, 80], dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
@@ -692,7 +622,6 @@ def render_client_portal():
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    # Clean the baseline telemetry data
     master_df = master_df[(master_df['temperature'] >= -30.0) & (master_df['temperature'] <= 120.0)]
     master_df = master_df[
         (~master_df['Location'].str.upper().str.contains('OFFICE')) &
@@ -703,7 +632,6 @@ def render_client_portal():
     proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
     master_df['Project'] = master_df['Project'].astype(str).str.strip()
     
-    # Client visual settings
     show_theoretical = True
     show_ambient = True
     show_elevation = False
@@ -758,7 +686,6 @@ def render_client_portal():
         st.error("❌ No data found for the selected Phase/System filters.")
         st.stop()
 
-    # --- AMBIENT DATA INJECTION ---
     ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
     ambient_data_global = master_df[ambient_mask_master].copy()
     
@@ -768,46 +695,34 @@ def render_client_portal():
             full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
 
     # --- REGISTRY METADATA LOOKUP ---
-    phase_row = proj_registry.iloc[[0]] # Default to root job entry
+    phase_row = proj_registry.iloc[[0]] 
     if selected_phase:
-        # Match phase dynamically if recorded in registry
         specific_row = proj_registry[proj_registry['Project'].str.contains(str(selected_phase), case=False, na=False)]
         if not specific_row.empty:
             phase_row = specific_row
 
     primary_meta = phase_row.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', selected_phase if selected_phase else f"Project {root_job_id}")
     
-    if selected_phase and str(selected_phase).lower() not in str(display_name).lower():
-        display_name = f"{display_name} - {selected_phase}"
-
+    base_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
-    f_start_date = None
-    day_count_text = ""
-    if pd.notnull(primary_meta.get('Date_Freezedown')):
-        f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
-        days_since = (now_local - f_start_date).days
-        day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
-
-    st.title(f"📊 {display_name}")
+    st.title(f"📊 {base_project_name}")
     
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
     if pd.notnull(last_approved_local):
         st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
-    head_c1, head_c2 = st.columns(2)
-    with head_c1:
-        if day_count_text: st.subheader(day_count_text)
-    with head_c2:
-        if f_start_date: st.write(f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}")
-
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
-        # Pass the base project name and the registry table so it can dynamically build the headers and dates
         render_summary_tab(master_df, "°F", local_tz, base_project_name, proj_registry)
+
+    with tabs[1]:
+        ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+        ambient_df = full_p_df[ambient_mask].copy()
+        
+        raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
+        locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
         
         try:
             map_query = f"""
@@ -828,8 +743,8 @@ def render_client_portal():
                 current_phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
-                loc_f_start_date = f_start_date
                 
+                loc_f_start_date = None
                 if not current_phase_row.empty:
                     raw_phase_fd = current_phase_row.iloc[0].get('Date_Freezedown')
                     if pd.notnull(raw_phase_fd):
@@ -858,54 +773,31 @@ def render_client_portal():
                 
                 if has_map and show_as_built:
                     col_chart, col_map = st.columns([3, 1])
-
                     with col_chart:
                         fig = build_high_speed_graph(
-                            df=loc_data, 
-                            title=f"{loc} History", 
-                            start_view=loc_start_view, 
-                            end_view=loc_last_data_ts + timedelta(hours=2), 
-                            unit_mode="Fahrenheit", 
-                            unit_label="°F", 
-                            display_tz=local_tz, 
-                            f_start_date=loc_f_start_date, 
-                            curve_id=graph_curve_id,
-                            ambient_df=target_ambient,
-                            target_phase=selected_phase,
-                            show_theoretical=show_theoretical,
-                            show_ambient=show_ambient,
-                            show_elevation=show_elevation
+                            df=loc_data, title=f"{loc} History", start_view=loc_start_view, 
+                            end_view=loc_last_data_ts + timedelta(hours=2), unit_mode="Fahrenheit", 
+                            unit_label="°F", display_tz=local_tz, f_start_date=loc_f_start_date, 
+                            curve_id=graph_curve_id, ambient_df=target_ambient, target_phase=selected_phase,
+                            show_theoretical=show_theoretical, show_ambient=show_ambient, show_elevation=show_elevation
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
                     with col_map:
                         site_map_fig = build_cropped_site_map(
-                            project_id=root_job_id, 
-                            location_name=loc, 
-                            df_map=df_all_locs,
-                            as_built_dir="as_builts"
+                            project_id=root_job_id, location_name=loc, df_map=df_all_locs, as_built_dir="as_builts"
                         )
                         if site_map_fig:
                             st.plotly_chart(site_map_fig, use_container_width=True)
                         else:
                             st.info(f"🗺️ Map image for {root_job_id} not found in the as_builts folder.")
-                
                 else:
                     fig = build_high_speed_graph(
-                        df=loc_data, 
-                        title=f"{loc} History", 
-                        start_view=loc_start_view, 
-                        end_view=loc_last_data_ts + timedelta(hours=2), 
-                        unit_mode="Fahrenheit", 
-                        unit_label="°F", 
-                        display_tz=local_tz, 
-                        f_start_date=loc_f_start_date, 
-                        curve_id=graph_curve_id,
-                        ambient_df=target_ambient,
-                        target_phase=selected_phase,
-                        show_theoretical=show_theoretical,
-                        show_ambient=show_ambient,
-                        show_elevation=show_elevation
+                        df=loc_data, title=f"{loc} History", start_view=loc_start_view, 
+                        end_view=loc_last_data_ts + timedelta(hours=2), unit_mode="Fahrenheit", 
+                        unit_label="°F", display_tz=local_tz, f_start_date=loc_f_start_date, 
+                        curve_id=graph_curve_id, ambient_df=target_ambient, target_phase=selected_phase,
+                        show_theoretical=show_theoretical, show_ambient=show_ambient, show_elevation=show_elevation
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -926,17 +818,13 @@ def render_client_portal():
                      st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
                 else:
                     for filename in asbuilt_filenames:
-                        possible_paths = [
-                            os.path.join("as_builts", filename), 
-                            filename
-                        ]
+                        possible_paths = [os.path.join("as_builts", filename), filename]
                         img_found = False
                         for path in possible_paths:
                             if os.path.exists(path):
                                 try:
                                     with open(path, "rb") as img_file:
                                         img_bytes = img_file.read()
-                                    
                                     st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
                                     st.markdown("<br>", unsafe_allow_html=True) 
                                     img_found = True
@@ -945,10 +833,10 @@ def render_client_portal():
                                     st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
                                     img_found = True 
                                     break
-                        
                         if not img_found:
                             st.error(f"❌ Drawing Not Found: '{filename}' in the as_builts folder.")
             else:
                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+
 # --- EXECUTION ---
 render_client_portal()
