@@ -53,19 +53,20 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     """
     Generates a dynamically cropped Plotly map centered on a specific pipe location.
     """
-    # --- ADD THIS SAFETY CHECK ---
+    # Safety check against empty data
     if df_map is None or df_map.empty or 'Project' not in df_map.columns:
         return None
+        
     # 1. Filter the TempPipeLoc dataframe for the specific project and location
     pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
     
     if pipe_data.empty:
-        return None # Fails gracefully if coordinates aren't mapped yet
+        return None
         
     pipe_x = float(pipe_data.iloc[0]['Map_X'])
     pipe_y = float(pipe_data.iloc[0]['Map_Y'])
 
-    # 2. Find the associated as-built image (assuming the filename starts with the project ID)
+    # 2. Find the associated as-built image
     if not os.path.exists(as_built_dir):
         return None
         
@@ -94,23 +95,23 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     ))
 
     # Set the image as the background
-    # Note: Y-axis inversion is standard for image processing (0 is top left)
     fig.update_layout(
         images=[dict(
             source=img,
             xref="x", yref="y",
-            x=0, y=img.height, 
+            x=0, y=0,  # <-- THE FIX: Anchor the image to the top-left (0,0) to match pixel coordinates
             sizex=img.width, sizey=img.height,
             sizing="stretch",
             opacity=0.9,
             layer="below"
         )],
-        # Lock the view to a 600x600 pixel window centered directly on the pipe
+        # Lock the view to a 600x600 pixel window centered directly on the pipe. 
+        # The inverted y-axis [bottom, top] forces Plotly to match image coordinates.
         xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
         yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
-        margin=dict(l=0, r=0, t=0, b=0), # Strip out all Plotly whitespace
+        margin=dict(l=0, r=0, t=0, b=0), 
         showlegend=False,
-        height=400 # Keep it compact so it fits nicely next to your temp charts
+        height=400 
     )
     
     return fig
