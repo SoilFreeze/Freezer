@@ -833,24 +833,35 @@ def render_client_portal():
         
     with tabs[4]:
         if show_as_built:
-            asbuilt_raw = primary_meta.get('AsBuiltFile')
+            # 1. Dynamically refresh phase_meta for the selected phase
+            current_asbuilt_meta = primary_meta
+            if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
+                phase_num_clean = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
+                # Find the exact registry row corresponding to this phase
+                matching_reg_row = proj_registry[
+                    proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(phase_num_clean)}$', na=False) |
+                    proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(phase_num_clean)}\b', na=False)
+                ]
+                if not matching_reg_row.empty:
+                    current_asbuilt_meta = matching_reg_row.iloc[0].to_dict()
+
+            asbuilt_raw = current_asbuilt_meta.get('AsBuiltFile')
+            
             if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
                 all_asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
                 
-                # --- NEW: Filter files for the specific phase ---
-                asbuilt_filenames = all_asbuilt_filenames
+                # 2. Strict filename filtering based on the naming convention (e.g., 2541-1-X.png vs 2541-2-X.png)
+                asbuilt_filenames = []
                 if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
-                    # Extract the pure phase number (e.g., "Phase 2" -> "2")
                     phase_num = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
-                    target_prefix = f"{root_job_id}-{phase_num}-"
+                    target_pattern = fr"{root_job_id}-{phase_num}-"
                     
-                    # Keep files that match the specific phase naming logic (e.g., "2541-2-")
-                    phase_specific_files = [f for f in all_asbuilt_filenames if f.startswith(target_prefix) or target_prefix in f]
-                    
-                    # If matches are found, display only those. (If none match, gracefully fall back to showing all).
-                    if phase_specific_files:
-                        asbuilt_filenames = phase_specific_files
-                # ------------------------------------------------
+                    # Strictly filter for files matching "JOB-PHASE-" pattern
+                    asbuilt_filenames = [f for f in all_asbuilt_filenames if target_pattern in f]
+                
+                # Fallback to all files in asbuilt_raw if no strict phase pattern match was found
+                if not asbuilt_filenames:
+                    asbuilt_filenames = all_asbuilt_filenames
 
                 if not asbuilt_filenames:
                      st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
@@ -875,5 +886,6 @@ def render_client_portal():
                             st.error(f"❌ Drawing Not Found: '{filename}' in the as_builts folder.")
             else:
                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+                
 # --- EXECUTION ---
 render_client_portal()
