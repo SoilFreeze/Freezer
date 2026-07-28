@@ -377,12 +377,26 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             
         phase_str = str(phase).strip()
         
-        phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict()
+        # --- STRICT PER-PHASE DATE MATCHING ---
+        phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict() # default fallback
         if phase_str != 'Default' and phase_str != 'Unassigned Phase':
-            specific_row = proj_registry[proj_registry['Project'].str.contains(phase_str, case=False, na=False)]
-            if not specific_row.empty:
-                phase_meta = specific_row.iloc[0].to_dict()
+            # Loop through the registry and strictly check the end of the Project string
+            # This prevents "1" from improperly matching "SR 160"
+            for idx, row in proj_registry.iterrows():
+                p_name = str(row['Project']).upper().strip()
+                s_name = str(phase_str).upper().strip()
                 
+                parts = [p.strip() for p in p_name.split('-')]
+                if len(parts) > 1:
+                    last_part = parts[-1]
+                    if s_name == last_part or f"PHASE {s_name}" == last_part or f"P{s_name}" == last_part:
+                        phase_meta = row.to_dict()
+                        break
+                else:
+                    if p_name.endswith(s_name) or p_name.endswith(f"PHASE {s_name}"):
+                        phase_meta = row.to_dict()
+                        break
+                        
         f_start_date = None
         day_count_text = ""
         start_date_text = ""
@@ -392,10 +406,10 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
             start_date_text = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}"
 
+        # --- DYNAMIC PHASE TITLES ---
         if phase_str == 'Default' or phase_str == 'Unassigned Phase':
             header_title = base_project_name
         else:
-            # Automatically add the word "Phase" if it's just a number
             if "PHASE" not in phase_str.upper():
                 header_title = f"{base_project_name} - Phase {phase_str}"
             else:
@@ -421,7 +435,9 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             
             system_str = str(system).strip()
             if system_str.upper() != 'DEFAULT' and system_str.upper() != 'UNASSIGNED SYSTEM':
-                st.markdown(f"##### ⚙️ {system_str}")
+                # --- DYNAMIC SYSTEM PREFIX ---
+                display_sys = f"System {system_str}" if not system_str.upper().startswith("SYSTEM") else system_str
+                st.markdown(f"##### ⚙️ {display_sys}")
             
             sys_df = phase_df[phase_df['System'] == system]
             
