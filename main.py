@@ -423,8 +423,8 @@ elif selected_project != "All Projects":
             job_num = str(selected_project).split('-')[0].strip()
             try:
                 map_query = f"""
-                    SELECT Project, Location, Map_X, Map_Y 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.df_temp_pipe_loc` 
+                    SELECT Project, Location, Map_X, Map_Y, Image_Name 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
                     WHERE CAST(Project AS STRING) = '{job_num}'
                 """
                 df_all_locs = sidebar_client.query(map_query).to_dataframe()
