@@ -388,8 +388,17 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
 # --- UI TABS ---
 
-def render_summary_tab(master_df, unit_label, local_tz):
-    st.subheader("🌐 24-Hour Project Thermal Summary")
+def render_summary_tab(master_df, unit_label, local_tz, project_title, start_date_text, day_count_text):
+    # --- INJECT TITLE & DATES ---
+    st.subheader(f"📊 {project_title}")
+    
+    date_c1, date_c2 = st.columns(2)
+    with date_c1:
+        if day_count_text: st.markdown(day_count_text)
+    with date_c2:
+        if start_date_text: st.markdown(start_date_text)
+        
+    st.markdown("---")
     
     df_local = master_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -406,7 +415,6 @@ def render_summary_tab(master_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
-    # Ensure Phase and System columns exist and handle empty fields
     if 'Phase' not in df_local.columns:
         df_local['Phase'] = 'Default'
     df_local['Phase'] = df_local['Phase'].fillna('Unassigned Phase').replace(['', 'NAN', 'NONE'], 'Unassigned Phase')
@@ -415,9 +423,7 @@ def render_summary_tab(master_df, unit_label, local_tz):
         df_local['System'] = 'Default'
     df_local['System'] = df_local['System'].fillna('Unassigned System').replace(['', 'NAN', 'NONE'], 'Unassigned System')
     
-    # Identify project-wide ambient sensors
     ambient_global = df_local[df_local['PipeType'] == 'Ambient'].copy()
-    
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
     
     phases = sorted(df_local['Phase'].unique(), key=natural_sort_key)
@@ -425,16 +431,13 @@ def render_summary_tab(master_df, unit_label, local_tz):
     for phase in phases:
         phase_df = df_local[df_local['Phase'] == phase]
         
-        # Skip rendering a whole Phase block if it ONLY contains orphan ambient sensors
         if phase_df['PipeType'].nunique() == 1 and phase_df['PipeType'].iloc[0] == 'Ambient':
             continue
             
         st.markdown(f"### 📂 Phase: {phase}")
-        
         systems = sorted(phase_df['System'].unique(), key=natural_sort_key)
         
         for system in systems:
-            # Skip rendering a specific system if it's just orphan ambient sensors
             if system == 'Unassigned System' and len(systems) > 1:
                 sys_check = phase_df[phase_df['System'] == system]
                 if sys_check['PipeType'].nunique() == 1 and sys_check['PipeType'].iloc[0] == 'Ambient':
@@ -443,7 +446,6 @@ def render_summary_tab(master_df, unit_label, local_tz):
             st.markdown(f"##### ⚙️ System: {system}")
             sys_df = phase_df[phase_df['System'] == system]
             
-            # Inject global ambient data into this system's summary if it lacks its own
             if not ambient_global.empty and 'Ambient' not in sys_df['PipeType'].values:
                 sys_df = pd.concat([sys_df, ambient_global], ignore_index=True)
                 
@@ -455,13 +457,11 @@ def render_summary_tab(master_df, unit_label, local_tz):
 
             for i, p_type in enumerate(categories):
                 with cols[i]:
-                    st.markdown(f"**{p_type}**")
-                    
                     snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
                     hist_type_df = hist_window[hist_window['PipeType'] == p_type]
                     
                     if snap_type_df.empty:
-                        st.caption("No data available.")
+                        st.markdown(f"**{p_type}**<br><span style='color:gray; font-size: 14px;'>No data available.</span>", unsafe_allow_html=True)
                         continue
 
                     avg_val = snap_type_df['temperature'].mean()
@@ -473,13 +473,21 @@ def render_summary_tab(master_df, unit_label, local_tz):
                         high_val = snap_type_df['temperature'].max()
                         low_val = snap_type_df['temperature'].min()
 
-                    st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
-                    st.markdown("<div style='height:5px;'></div>", unsafe_allow_html=True)
-
-                    sub1, sub2 = st.columns(2)
-                    sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
-                    sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
-            st.divider()
+                    # --- BUNDLED METRICS CARD ---
+                    st.markdown(f"""
+                    <div style="background-color: #f8f9fa; padding: 12px; border-radius: 8px; border: 1px solid #e9ecef;">
+                        <div style="font-weight: bold; margin-bottom: 8px; font-size: 16px;">{p_type}</div>
+                        <div style="font-size: 24px; font-weight: bold; color: #1f77b4; margin-bottom: 8px;">{avg_val:.1f}{unit_label} <span style="font-size: 12px; font-weight: normal; color: #6c757d;">AVG</span></div>
+                        <div style="font-size: 14px; color: #495057; display: flex; justify-content: space-between;">
+                            <span>🔺 <b>H:</b> {high_val:.1f}{unit_label}</span>
+                            <span>🔻 <b>L:</b> {low_val:.1f}{unit_label}</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+            st.markdown("<br>", unsafe_allow_html=True)
+        st.divider()
+        
 def render_pipe_summary_table(full_p_df, unit_label, local_tz):
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -771,7 +779,8 @@ def render_client_portal():
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
-        render_summary_tab(master_df, "°F", local_tz)
+        start_date_display = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}" if f_start_date else ""
+        render_summary_tab(master_df, "°F", local_tz, display_name, start_date_display, day_count_text)
 
     with tabs[1]:
         ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
