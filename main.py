@@ -430,25 +430,57 @@ elif selected_project != "All Projects":
                 if loc_data.empty:
                     continue
 
-                fig = build_high_speed_graph(
-                    client=sidebar_client,  
-                    df=loc_data, 
-                    title=f"Thermal Trends: {loc}",
-                    start_view=start_date, 
-                    end_view=end_date, 
-                    active_refs=active_refs,
-                    unit_mode=unit_mode,
-                    unit_label=unit_label,
-                    display_tz=display_tz,
-                    f_start_date=freeze_start_ts, 
-                    curve_id=selected_project,
-                    show_elevation=st.session_state.get('global_show_elevation', False) # <-- ADDED THIS
-                )
-                
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.markdown("---")
+                # 1. Create a split layout for EACH location
+                col_chart, col_map = st.columns([3, 1])
 
+                # 2. Put the Temperature Chart on the left
+                with col_chart:
+                    fig = build_high_speed_graph(
+                        client=sidebar_client,  
+                        df=loc_data, 
+                        title=f"Thermal Trends: {loc}",
+                        start_view=start_date, 
+                        end_view=end_date, 
+                        active_refs=active_refs,
+                        unit_mode=unit_mode,
+                        unit_label=unit_label,
+                        display_tz=display_tz,
+                        f_start_date=freeze_start_ts, 
+                        curve_id=selected_project,
+                        show_elevation=st.session_state.get('global_show_elevation', False) 
+                    )
+                    
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # 3. Put the Cropped Map on the right
+                with col_map:
+                    job_num = str(selected_project).split('-')[0].strip()
+                    
+                    # Fetch just this location's coordinates to keep it fast
+                    try:
+                        map_query = f"""
+                            SELECT Project, Location, Map_X, Map_Y 
+                            FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+                            WHERE CAST(Project AS STRING) = '{job_num}' AND Location = '{loc}'
+                        """
+                        df_loc = sidebar_client.query(map_query).to_dataframe()
+                    except Exception:
+                        df_loc = pd.DataFrame()
+                        
+                    site_map_fig = build_cropped_site_map(
+                        project_id=job_num, 
+                        location_name=loc, 
+                        df_map=df_loc,
+                        as_built_dir="as_builts"
+                    )
+                    
+                    if site_map_fig:
+                        st.plotly_chart(site_map_fig, use_container_width=True)
+                    else:
+                        st.info(f"🗺️ Location `{loc}` is not mapped yet.")
+
+                st.markdown("---")
         # ---------------------------------------------------------
         # TAB 2: SITE AS-BUILTS & CROPPED MAPS
         # ---------------------------------------------------------
