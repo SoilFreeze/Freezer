@@ -252,7 +252,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 
                 node_pos_df = pd.concat([node_pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
             
-            display_name = f"{pos} ({node_id})"
+            loc_val = node_pos_df['Location'].iloc[0] if 'Location' in node_pos_df.columns else ""
+            display_name = f"{loc_val} - {pos} (Node: {node_id})"
             
             fig.add_trace(go.Scatter(
                 x=node_pos_df['timestamp'], y=node_pos_df['temperature'], 
