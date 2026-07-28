@@ -392,10 +392,14 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
             start_date_text = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}"
 
-        if phase_str.lower() in base_project_name.lower() or base_project_name.lower() in phase_str.lower() or phase_str == 'Default':
+        if phase_str == 'Default' or phase_str == 'Unassigned Phase':
             header_title = base_project_name
         else:
-            header_title = f"{base_project_name} - {phase_str}"
+            # Automatically add the word "Phase" if it's just a number
+            if "PHASE" not in phase_str.upper():
+                header_title = f"{base_project_name} - Phase {phase_str}"
+            else:
+                header_title = f"{base_project_name} - {phase_str}"
             
         st.markdown(f"### 📊 {header_title}")
         
@@ -703,7 +707,10 @@ def render_client_portal():
 
     primary_meta = phase_row.iloc[0].to_dict()
     
-    base_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
+    raw_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
+    # Truncate "- Phase 2" or similar from the master project title so it is perfectly clean
+    base_project_name = re.split(r'(?i)\s*-\s*Phase', raw_project_name)[0].strip()
+    
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     st.title(f"📊 {base_project_name}")
