@@ -377,26 +377,18 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             
         phase_str = str(phase).strip()
         
-        # --- STRICT PER-PHASE DATE MATCHING ---
-        phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict() # default fallback
-        if phase_str != 'Default' and phase_str != 'Unassigned Phase':
-            # Loop through the registry and strictly check the end of the Project string
-            # This prevents "1" from improperly matching "SR 160"
-            for idx, row in proj_registry.iterrows():
-                p_name = str(row['Project']).upper().strip()
-                s_name = str(phase_str).upper().strip()
-                
-                parts = [p.strip() for p in p_name.split('-')]
-                if len(parts) > 1:
-                    last_part = parts[-1]
-                    if s_name == last_part or f"PHASE {s_name}" == last_part or f"P{s_name}" == last_part:
-                        phase_meta = row.to_dict()
-                        break
-                else:
-                    if p_name.endswith(s_name) or p_name.endswith(f"PHASE {s_name}"):
-                        phase_meta = row.to_dict()
-                        break
-                        
+        # --- EXACT PER-PHASE DATE MATCHING ---
+        # Grab the literal exact Project ID attached to the telemetry data for this phase
+        exact_project_id = str(phase_df['Project'].iloc[0]).strip()
+        
+        # Look up that exact Project ID in the registry database
+        specific_row = proj_registry[proj_registry['Project'].astype(str).str.strip() == exact_project_id]
+        
+        if not specific_row.empty:
+            phase_meta = specific_row.iloc[0].to_dict()
+        else:
+            phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict() # default fallback
+            
         f_start_date = None
         day_count_text = ""
         start_date_text = ""
