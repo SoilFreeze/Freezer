@@ -53,6 +53,9 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     """
     Generates a dynamically cropped Plotly map centered on a specific pipe location.
     """
+    # --- ADD THIS SAFETY CHECK ---
+    if df_map is None or df_map.empty or 'Project' not in df_map.columns:
+        return None
     # 1. Filter the TempPipeLoc dataframe for the specific project and location
     pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
     
