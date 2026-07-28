@@ -339,7 +339,6 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     )
     return fig
 
-# --- UI TABS ---
 def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_registry):
     df_local = master_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -377,17 +376,23 @@ def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_
             
         phase_str = str(phase).strip()
         
-        # --- EXACT PER-PHASE DATE MATCHING ---
-        # Grab the literal exact Project ID attached to the telemetry data for this phase
-        exact_project_id = str(phase_df['Project'].iloc[0]).strip()
+        # --- STRICT REGEX PER-PHASE DATE MATCHING ---
+        # Extract just the pure phase number (e.g., "Phase 1" becomes "1")
+        core_phase = re.sub(r'(?i)PHASE\s*', '', phase_str).strip()
         
-        # Look up that exact Project ID in the registry database
-        specific_row = proj_registry[proj_registry['Project'].astype(str).str.strip() == exact_project_id]
+        # 1. Search the ProjectName for exactly "Phase X" (prevents "1" from matching "160")
+        name_match = proj_registry[proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(core_phase)}\b', na=False)]
         
-        if not specific_row.empty:
-            phase_meta = specific_row.iloc[0].to_dict()
+        if not name_match.empty:
+            phase_meta = name_match.iloc[0].to_dict()
         else:
-            phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict() # default fallback
+            # 2. Fallback: check if the Project ID ends in "-X" or "-PhaseX"
+            id_match = proj_registry[proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(core_phase)}$', na=False)]
+            if not id_match.empty:
+                phase_meta = id_match.iloc[0].to_dict()
+            else:
+                # 3. Ultimate fallback to the root row if no specific phase row exists
+                phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict()
             
         f_start_date = None
         day_count_text = ""
