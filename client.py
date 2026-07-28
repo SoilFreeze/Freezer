@@ -388,18 +388,7 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
 # --- UI TABS ---
 
-def render_summary_tab(master_df, unit_label, local_tz, project_title, start_date_text, day_count_text):
-    # --- INJECT TITLE & DATES ---
-    st.subheader(f"📊 {project_title}")
-    
-    date_c1, date_c2 = st.columns(2)
-    with date_c1:
-        if day_count_text: st.markdown(day_count_text)
-    with date_c2:
-        if start_date_text: st.markdown(start_date_text)
-        
-    st.markdown("---")
-    
+def render_summary_tab(master_df, unit_label, local_tz, base_project_name, start_date_text, day_count_text):
     df_local = master_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
@@ -434,7 +423,24 @@ def render_summary_tab(master_df, unit_label, local_tz, project_title, start_dat
         if phase_df['PipeType'].nunique() == 1 and phase_df['PipeType'].iloc[0] == 'Ambient':
             continue
             
-        st.markdown(f"### 📂 Phase: {phase}")
+        # Dynamically build the title (e.g., "SR 16/SR 160/Kitsap County Fish Passage - Phase 2")
+        phase_str = str(phase).strip()
+        if phase_str.lower() in base_project_name.lower() or base_project_name.lower() in phase_str.lower() or phase_str == 'Default':
+            header_title = base_project_name
+        else:
+            header_title = f"{base_project_name} - {phase_str}"
+            
+        st.markdown(f"### 📊 {header_title}")
+        
+        # Inject the start dates and day count right below the Phase title
+        date_c1, date_c2 = st.columns(2)
+        with date_c1:
+            if day_count_text: st.markdown(day_count_text)
+        with date_c2:
+            if start_date_text: st.markdown(start_date_text)
+            
+        st.markdown("<hr style='margin-top: 5px; margin-bottom: 15px;'>", unsafe_allow_html=True)
+        
         systems = sorted(phase_df['System'].unique(), key=natural_sort_key)
         
         for system in systems:
@@ -443,7 +449,11 @@ def render_summary_tab(master_df, unit_label, local_tz, project_title, start_dat
                 if sys_check['PipeType'].nunique() == 1 and sys_check['PipeType'].iloc[0] == 'Ambient':
                     continue 
             
-            st.markdown(f"##### ⚙️ System: {system}")
+            # Print the system exactly as it appears in your file (e.g., "System 22" or "System 53")
+            system_str = str(system).strip()
+            if system_str.upper() != 'DEFAULT' and system_str.upper() != 'UNASSIGNED SYSTEM':
+                st.markdown(f"##### ⚙️ {system_str}")
+            
             sys_df = phase_df[phase_df['System'] == system]
             
             if not ambient_global.empty and 'Ambient' not in sys_df['PipeType'].values:
@@ -473,7 +483,7 @@ def render_summary_tab(master_df, unit_label, local_tz, project_title, start_dat
                         high_val = snap_type_df['temperature'].max()
                         low_val = snap_type_df['temperature'].min()
 
-                    # --- BUNDLED METRICS CARD ---
+                    # --- COMPACT BUNDLED METRICS CARD ---
                     st.markdown(f"""
                     <div style="background-color: #f8f9fa; padding: 12px; border-radius: 8px; border: 1px solid #e9ecef;">
                         <div style="font-weight: bold; margin-bottom: 8px; font-size: 16px;">{p_type}</div>
@@ -782,12 +792,15 @@ def render_client_portal():
         start_date_display = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}" if f_start_date else ""
         render_summary_tab(master_df, "°F", local_tz, display_name, start_date_display, day_count_text)
 
-    with tabs[1]:
-        ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-        ambient_df = full_p_df[ambient_mask].copy()
+    with tabs[0]:
+        # Grab the pure base project name from the registry
+        base_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
         
-        raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
-        locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
+        # Format the start date string to match your screenshot
+        start_date_display = f"Start Freezedown: {f_start_date.strftime('%b %d, %Y')}" if f_start_date else ""
+        
+        # Execute the summary tab with the new parameters
+        render_summary_tab(master_df, "°F", local_tz, base_project_name, start_date_display, day_count_text)
         
         try:
             map_query = f"""
