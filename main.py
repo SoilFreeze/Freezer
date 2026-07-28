@@ -456,7 +456,7 @@ elif selected_project != "All Projects":
                     has_map = str(loc) in df_all_locs['Location'].astype(str).values
 
                 # --- UPDATED: Now requires BOTH the coordinates to exist AND the toggle to be ON ---
-                if has_map and show_site_map:
+                if has_map and st.session_state.get('global_show_map', True):
                     # 1. SPLIT LAYOUT: For mapped locations when the toggle is ON
                     col_chart, col_map = st.columns([3, 1])
 
