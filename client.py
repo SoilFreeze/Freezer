@@ -605,18 +605,21 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
             y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
             fig.update_layout(
-                title=f"<b>Temp vs Depth - {loc}</b>", plot_bgcolor='white', height=800,
+                title=f"<b>Temp vs Depth - {loc}</b>", 
+                plot_bgcolor='white', 
+                height=800,
                 xaxis=dict(
                     title=f"Temperature ({unit_label})", range=[-20, 80], dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True
+                    gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
                 ),
                 yaxis=dict(
                     title="Depth (ft)", range=[y_limit, 0], dtick=10,
                     minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True
+                    gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
                 ),
-                legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
+                # Pushed the y-coordinate from -0.1 to -0.18 to create a comfortable gap below the axis title
+                legend=dict(orientation="h", y=-0.18, xanchor="center", x=0.5)
             )
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}")
 
