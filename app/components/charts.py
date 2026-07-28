@@ -49,11 +49,12 @@ def get_cached_ambient_data(job_num, start_str):
         return client.query(amb_q).to_dataframe()
     except:
         return pd.DataFrame()
+        
 def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts"):
     """
     Generates a dynamically cropped Plotly map centered on a specific pipe location.
+    Handles multiple images per project based on the Image_Name column.
     """
-    # Safety check against empty data
     if df_map is None or df_map.empty or 'Project' not in df_map.columns:
         return None
         
@@ -66,36 +67,45 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     pipe_x = float(pipe_data.iloc[0]['Map_X'])
     pipe_y = float(pipe_data.iloc[0]['Map_Y'])
 
-    # 2. Find the associated as-built image
+    # 2. Determine which image file to use
     if not os.path.exists(as_built_dir):
         return None
+
+    target_filename = None
+    # Check if the Image_Name column exists and has a value for this pipe
+    if 'Image_Name' in pipe_data.columns and pd.notnull(pipe_data.iloc[0]['Image_Name']):
+        target_filename = str(pipe_data.iloc[0]['Image_Name']).strip()
+
+    if target_filename:
+        # Pull the exact image specified in the Google Sheet
+        img_path = os.path.join(as_built_dir, target_filename)
+        if not os.path.exists(img_path):
+            return None 
+    else:
+        # FALLBACK: If no image is specified in the sheet, just grab the first one that matches the ID
+        available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if not available_files:
+            return None
+        img_path = os.path.join(as_built_dir, available_files[0])
         
-    available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    
-    if not available_files:
-        return None
-        
-    img_path = os.path.join(as_built_dir, available_files[0])
     img = Image.open(img_path)
 
     # 3. Build the Plotly Figure
     fig = go.Figure()
 
-    # Add the thinner, 1.5x hollow circle for the specific pipe location
     fig.add_trace(go.Scatter(
         x=[pipe_x], 
         y=[pipe_y],
         mode='markers', 
         name=location_name,
         marker=dict(
-            size=27, # 1.5x the size of the original dot
-            color='rgba(0,0,0,0)', # Completely transparent inside
-            line=dict(width=2, color='red') # Thinner, sharper outline
+            size=27, 
+            color='rgba(0,0,0,0)', 
+            line=dict(width=2, color='red') 
         ),
         hoverinfo='none'
     ))
 
-    # Set the image as the background
     fig.update_layout(
         images=[dict(
             source=img,
