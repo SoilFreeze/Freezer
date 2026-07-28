@@ -621,7 +621,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                 # Pushed the y-coordinate from -0.1 to -0.18 to create a comfortable gap below the axis title
                 legend=dict(orientation="h", y=-0.18, xanchor="center", x=0.5)
             )
-            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}")
+            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}", theme=None)
 
 def render_client_portal():
     client = get_bq_client()
