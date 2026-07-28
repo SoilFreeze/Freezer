@@ -424,13 +424,12 @@ elif selected_project != "All Projects":
             try:
                 map_query = f"""
                     SELECT Project, Location, Map_X, Map_Y 
-                    FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+                    FROM `{PROJECT_ID}.{DATASET_ID}.df_temp_pipe_loc` 
                     WHERE CAST(Project AS STRING) = '{job_num}'
                 """
                 df_all_locs = sidebar_client.query(map_query).to_dataframe()
             except Exception as e:
                 df_all_locs = pd.DataFrame()
-                # Surfacing the true error so you can see why T1 isn't mapping!
                 st.error(f"⚠️ BigQuery Table Error: {e}")
             # ---------------------------------------------------------------------
 
