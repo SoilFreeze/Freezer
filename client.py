@@ -146,7 +146,8 @@ def get_universal_portal_data(target_job_number):
 # --- THE ENGINEERING GRAPHING ENGINE ---
 
 def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
-                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None, target_phase=None):
+                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None, target_phase=None,
+                           show_theoretical=True, show_ambient=True, show_elevation=False):
     if df.empty: return go.Figure().update_layout(title="No data available")
 
     client = get_bq_client()
@@ -161,7 +162,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
     final_end_view, final_start_view = end_view, start_view
     loc_part = str(curve_id).split('-')[-1] if curve_id else ""
 
-    if curve_id and f_start_date:
+    # --- INJECT THEORETICAL CURVE (Linked to UI Toggle) ---
+    if show_theoretical and curve_id and f_start_date:
         try:
             dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
             
@@ -268,8 +270,8 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
                 text=node_pos_df['NodeNum']
             ))
 
-    # --- INJECT AMBIENT DATA ONTO BRINE GRAPHS ---
-    if ambient_df is not None and not ambient_df.empty:
+    # --- INJECT AMBIENT DATA (Linked to UI Toggle) ---
+    if show_ambient and ambient_df is not None and not ambient_df.empty:
         amb_plot_df = ambient_df.copy()
         
         # ⏱️ TIMEZONE FIX: Aligns ambient data with the local time of the current graph
@@ -588,6 +590,24 @@ def render_client_portal():
         st.error("No valid phases found in the data.")
         return
 
+    # --- NEW VISUALIZATION CONTROLS ---
+    st.sidebar.markdown("### ⚙️ Visualization Options")
+    show_theoretical = st.sidebar.checkbox("Show Theoretical Curves", value=True)
+    show_ambient = st.sidebar.checkbox("Show Ambient Temp", value=True)
+    show_elevation = st.sidebar.checkbox("Show Elevation", value=False)
+    show_as_built = st.sidebar.checkbox("Show As-Built Maps", value=True)
+
+    # --- NEW TIMELINE NAVIGATION ---
+    st.sidebar.markdown("### ⏱️ Timeline Navigation")
+    timeline_mode = st.sidebar.radio("View Mode:", ["6 Weeks Default", "Custom Range", "Entire Project"])
+    
+    if timeline_mode == "Custom Range":
+        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 24, 6)
+    elif timeline_mode == "6 Weeks Default":
+        weeks_view = 6
+    else:
+        weeks_view = None  # None equates to viewing the entire project history
+
     # 3. Isolate data exclusively for the chosen phase
     target_phase_clean = str(selected_phase).strip()
     full_p_df = master_df[master_df['Project'] == target_phase_clean].copy()
@@ -626,16 +646,6 @@ def render_client_portal():
         st.info("But the telemetry database only contains the following Project IDs:")
         st.write(master_df['Project'].unique())
         st.stop() # Halts the script so you can see the error clearly
-            
-
-
-    # --- ☁️ AMBIENT WEATHER SHARING FIX ---
-    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    ambient_data_global = master_df[ambient_mask_master].copy()
-    
-    ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    if not ambient_data_global.empty and not ambient_mask_phase.any():
-        full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
 
     # 4. Isolate metadata for UI (Fallback gracefully if data naming doesn't perfectly match registry)
     proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
@@ -679,8 +689,6 @@ def render_client_portal():
         render_summary_tab(full_p_df, "°F", local_tz)
 
     with tabs[1]:
-        weeks_view = st.sidebar.slider("Timeline Span (Weeks)", 1, 12, 6)
-        
         # ☁️ ISOLATE AMBIENT DATA LOCALLY (now guaranteed to exist if the site has an ambient sensor)
         ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
         ambient_df = full_p_df[ambient_mask].copy()
@@ -699,17 +707,29 @@ def render_client_portal():
                 current_phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
                 
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
-                loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 loc_f_start_date = f_start_date
                 
+                # Dynamic Timeline Span Logic
                 if not current_phase_row.empty:
                     raw_phase_fd = current_phase_row.iloc[0].get('Date_Freezedown')
                     if pd.notnull(raw_phase_fd):
                         loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
-                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
                         
-                        if weeks_view:
-                            loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                # If Entire Project mode is selected (None), set start view to baseline / freeze start
+                if weeks_view is None:
+                    if loc_f_start_date:
+                        loc_start_view = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
+                    else:
+                        loc_start_view = ensure_tz_convert(loc_data['timestamp'], local_tz).min()
+                else:
+                    # Cut exactly N weeks from the latest reading
+                    loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
+                    
+                    # Prevent custom slider from going into blank space before the project began
+                    if loc_f_start_date:
+                        project_start = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
+                        if loc_start_view < project_start:
+                            loc_start_view = project_start
                 
                 # 🛡️ STRICT BRINE CHECK
                 loc_upper = str(loc).upper().strip()
@@ -724,6 +744,7 @@ def render_client_portal():
                 # 🎯 TARGETED INJECTION: Pass ambient_df to Brine graphs, ignore for Temp Pipes
                 target_ambient = ambient_df if is_brine_pipe else None
                 
+                # Passing the new sidebar UI flags into the chart builder
                 st.plotly_chart(build_high_speed_graph(
                     loc_data, 
                     f"{loc} History", 
@@ -735,7 +756,10 @@ def render_client_portal():
                     loc_f_start_date, 
                     graph_curve_id,
                     target_ambient,
-                    selected_phase # Pass the selected phase so the query filters correctly
+                    selected_phase,
+                    show_theoretical=show_theoretical,
+                    show_ambient=show_ambient,
+                    show_elevation=show_elevation
                 ), use_container_width=True)
 
     with tabs[2]:
@@ -746,39 +770,43 @@ def render_client_portal():
         render_pipe_summary_table(full_p_df, "°F", local_tz)
        
     with tabs[4]:
-        asbuilt_raw = primary_meta.get('AsBuiltFile')
-        if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
-            asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
-            
-            if not asbuilt_filenames:
-                 st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+        # Note: Added simple visibility wrapper for As-Built tab based on user toggle preference
+        if show_as_built:
+            asbuilt_raw = primary_meta.get('AsBuiltFile')
+            if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
+                asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
+                
+                if not asbuilt_filenames:
+                     st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+                else:
+                    for filename in asbuilt_filenames:
+                        possible_paths = [
+                            os.path.join("assets", "asbuilts", filename), 
+                            filename, 
+                            os.path.join("assets", filename)
+                        ]
+                        img_found = False
+                        for path in possible_paths:
+                            if os.path.exists(path):
+                                try:
+                                    with open(path, "rb") as img_file:
+                                        img_bytes = img_file.read()
+                                    
+                                    st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
+                                    st.markdown("<br>", unsafe_allow_html=True) 
+                                    img_found = True
+                                    break
+                                except Exception as img_err:
+                                    st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
+                                    img_found = True 
+                                    break
+                        
+                        if not img_found:
+                            st.error(f"❌ Drawing Not Found: '{filename}'")
             else:
-                for filename in asbuilt_filenames:
-                    possible_paths = [
-                        os.path.join("assets", "asbuilts", filename), 
-                        filename, 
-                        os.path.join("assets", filename)
-                    ]
-                    img_found = False
-                    for path in possible_paths:
-                        if os.path.exists(path):
-                            try:
-                                with open(path, "rb") as img_file:
-                                    img_bytes = img_file.read()
-                                
-                                st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
-                                st.markdown("<br>", unsafe_allow_html=True) 
-                                img_found = True
-                                break
-                            except Exception as img_err:
-                                st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
-                                img_found = True 
-                                break
-                    
-                    if not img_found:
-                        st.error(f"❌ Drawing Not Found: '{filename}'")
+                st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
         else:
-            st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
+            st.warning("🗺️ As-Built maps are currently hidden. Enable them in the sidebar View Controls.")
 
 # --- EXECUTION ---
 render_client_portal()
