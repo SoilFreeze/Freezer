@@ -81,16 +81,17 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     # 3. Build the Plotly Figure
     fig = go.Figure()
 
-    # Add the red dot for the specific pipe location
+    # Add the hollow circle for the specific pipe location
     fig.add_trace(go.Scatter(
         x=[pipe_x], 
         y=[pipe_y],
-        mode='markers+text',
+        mode='markers', # Removed the text mode
         name=location_name,
-        marker=dict(size=18, color='red', line=dict(width=3, color='white')),
-        text=[f"<b>{location_name}</b>"],
-        textposition="top center",
-        textfont=dict(color="red", size=16, family="Arial Black"),
+        marker=dict(
+            size=54, # Tripled the size (was 18)
+            color='rgba(0,0,0,0)', # Makes the inside of the circle completely transparent
+            line=dict(width=4, color='red') # The hollow outer ring
+        ),
         hoverinfo='none'
     ))
 
