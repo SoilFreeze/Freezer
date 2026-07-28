@@ -388,10 +388,10 @@ def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_labe
 
 # --- UI TABS ---
 
-def render_summary_tab(full_p_df, unit_label, local_tz):
-    st.subheader("🌐 24 hour Thermal Summary")
+def render_summary_tab(master_df, unit_label, local_tz):
+    st.subheader("🌐 24-Hour Project Thermal Summary")
     
-    df_local = full_p_df.copy()
+    df_local = master_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
     
     def classify_pipe(row):
@@ -406,41 +406,80 @@ def render_summary_tab(full_p_df, unit_label, local_tz):
 
     df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
     
+    # Ensure Phase and System columns exist and handle empty fields
+    if 'Phase' not in df_local.columns:
+        df_local['Phase'] = 'Default'
+    df_local['Phase'] = df_local['Phase'].fillna('Unassigned Phase').replace(['', 'NAN', 'NONE'], 'Unassigned Phase')
+    
+    if 'System' not in df_local.columns:
+        df_local['System'] = 'Default'
+    df_local['System'] = df_local['System'].fillna('Unassigned System').replace(['', 'NAN', 'NONE'], 'Unassigned System')
+    
+    # Identify project-wide ambient sensors
+    ambient_global = df_local[df_local['PipeType'] == 'Ambient'].copy()
+    
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-    df_24h_window = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-    latest_snapshot = df_local.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-
-    cols = st.columns(4)
-    categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
-
-    for i, p_type in enumerate(categories):
-        with cols[i]:
-            st.markdown(f"### {p_type}")
+    
+    phases = sorted(df_local['Phase'].unique(), key=natural_sort_key)
+    
+    for phase in phases:
+        phase_df = df_local[df_local['Phase'] == phase]
+        
+        # Skip rendering a whole Phase block if it ONLY contains orphan ambient sensors
+        if phase_df['PipeType'].nunique() == 1 and phase_df['PipeType'].iloc[0] == 'Ambient':
+            continue
             
-            snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
-            hist_type_df = df_24h_window[df_24h_window['PipeType'] == p_type]
+        st.markdown(f"### 📂 Phase: {phase}")
+        
+        systems = sorted(phase_df['System'].unique(), key=natural_sort_key)
+        
+        for system in systems:
+            # Skip rendering a specific system if it's just orphan ambient sensors
+            if system == 'Unassigned System' and len(systems) > 1:
+                sys_check = phase_df[phase_df['System'] == system]
+                if sys_check['PipeType'].nunique() == 1 and sys_check['PipeType'].iloc[0] == 'Ambient':
+                    continue 
             
-            if snap_type_df.empty:
-                st.caption("No data available.")
-                continue
-
-            avg_val = snap_type_df['temperature'].mean()
+            st.markdown(f"##### ⚙️ System: {system}")
+            sys_df = phase_df[phase_df['System'] == system]
             
-            if not hist_type_df.empty:
-                high_val = hist_type_df['temperature'].max()
-                low_val = hist_type_df['temperature'].min()
-            else:
-                high_val = snap_type_df['temperature'].max()
-                low_val = snap_type_df['temperature'].min()
+            # Inject global ambient data into this system's summary if it lacks its own
+            if not ambient_global.empty and 'Ambient' not in sys_df['PipeType'].values:
+                sys_df = pd.concat([sys_df, ambient_global], ignore_index=True)
+                
+            hist_window = sys_df[sys_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
+            latest_snapshot = sys_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
 
-            st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
-            st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+            cols = st.columns(4)
+            categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
 
-            sub1, sub2 = st.columns(2)
-            sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
-            sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
+            for i, p_type in enumerate(categories):
+                with cols[i]:
+                    st.markdown(f"**{p_type}**")
+                    
+                    snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
+                    hist_type_df = hist_window[hist_window['PipeType'] == p_type]
+                    
+                    if snap_type_df.empty:
+                        st.caption("No data available.")
+                        continue
+
+                    avg_val = snap_type_df['temperature'].mean()
+                    
+                    if not hist_type_df.empty:
+                        high_val = hist_type_df['temperature'].max()
+                        low_val = hist_type_df['temperature'].min()
+                    else:
+                        high_val = snap_type_df['temperature'].max()
+                        low_val = snap_type_df['temperature'].min()
+
+                    st.metric("Avg (Latest)", f"{avg_val:.1f}{unit_label}")
+                    st.markdown("<div style='height:5px;'></div>", unsafe_allow_html=True)
+
+                    sub1, sub2 = st.columns(2)
+                    sub1.caption(f"**High (24h):**\n{high_val:.1f}{unit_label}")
+                    sub2.caption(f"**Low (24h):**\n{low_val:.1f}{unit_label}")
             st.divider()
-
 def render_pipe_summary_table(full_p_df, unit_label, local_tz):
     df_local = full_p_df.copy()
     df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
@@ -732,7 +771,7 @@ def render_client_portal():
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
-        render_summary_tab(full_p_df, "°F", local_tz)
+        render_summary_tab(master_df, "°F", local_tz)
 
     with tabs[1]:
         ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
