@@ -806,7 +806,8 @@ def render_client_portal():
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
-        render_summary_tab(master_df, "°F", local_tz) # Or whatever parameters you had here
+        # Pass the base project name and the registry table so it can dynamically build the headers and dates
+        render_summary_tab(master_df, "°F", local_tz, base_project_name, proj_registry)
         
         try:
             map_query = f"""
