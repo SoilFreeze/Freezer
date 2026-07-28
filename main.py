@@ -193,10 +193,10 @@ st.session_state['global_show_ref'] = st.sidebar.checkbox(
     value=st.session_state.get('global_show_ref', default_curve)
 )
 
-# 4 & 5. Independent Data Auditing Controls
-st.session_state['global_show_masked'] = st.sidebar.checkbox(
-    "Show Masked Data", 
-    value=st.session_state.get('global_show_masked', False)
+# Independent Data Auditing & Visualization Controls
+st.session_state['global_show_map'] = st.sidebar.checkbox(
+    "🗺️ Show As-Built Site Maps", 
+    value=st.session_state.get('global_show_map', True) # Defaults to True so maps show automatically
 )
 
 st.session_state['global_show_baddata'] = st.sidebar.checkbox(
@@ -450,8 +450,14 @@ elif selected_project != "All Projects":
                 if not df_all_locs.empty and 'Location' in df_all_locs.columns:
                     has_map = str(loc) in df_all_locs['Location'].astype(str).values
 
-                if has_map:
-                    # 1. SPLIT LAYOUT: For mapped locations (T1, T2, etc.)
+                # Check if this specific location exists in your TempPipeLoc dataframe
+                has_map = False
+                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                    has_map = str(loc) in df_all_locs['Location'].astype(str).values
+
+                # --- UPDATED: Now requires BOTH the coordinates to exist AND the toggle to be ON ---
+                if has_map and show_site_map:
+                    # 1. SPLIT LAYOUT: For mapped locations when the toggle is ON
                     col_chart, col_map = st.columns([3, 1])
 
                     with col_chart:
@@ -485,7 +491,7 @@ elif selected_project != "All Projects":
                             st.info(f"🗺️ Map image for {job_num} not found in the as_builts folder.")
                 
                 else:
-                    # 2. FULL-WIDTH LAYOUT: For unmapped locations (Brine Temps, Air Temps)
+                    # 2. FULL-WIDTH LAYOUT: Used if the map toggle is OFF, or if coordinates don't exist
                     fig = build_high_speed_graph(
                         client=sidebar_client,  
                         df=loc_data, 
