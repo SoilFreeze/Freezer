@@ -290,17 +290,18 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             bad_data_mask = s_status.isin(['MASKED', 'BADDATA', 'OFFICE'])
             clean_y.loc[bad_data_mask] = float('nan')
         
-        # 3. Draw the main line using the 'clean_y' (which has holes where the masked data is)
+        # Add the hollow circle for the specific pipe location
         fig.add_trace(go.Scatter(
-            x=s_df['timestamp'], 
-            y=clean_y, # <-- USING THE NULLIFIED DATA HERE
-            name=display_name, 
-            mode='lines+markers',
-            marker=dict(size=3),
-            connectgaps=False, 
-            customdata=s_df[['NodeNum']], 
-            line=dict(shape='spline', smoothing=1.3, width=2, color=sf_15_palette[i % 15]),
-            hovertemplate="<b>%{fullData.name}</b>: %{y:.1f}" + unit_label + " <i>(Node: %{customdata[0]})</i><extra></extra>"
+            x=[pipe_x], 
+            y=[pipe_y],
+            mode='markers', 
+            name=location_name,
+            marker=dict(
+                size=27, # 1.5x the size of the original red dot
+                color='rgba(0,0,0,0)', 
+                line=dict(width=2, color='red') # Thinner, sharper outline
+            ),
+            hoverinfo='none'
         ))
         
         # 4. Draw the isolated warning markers using the original un-nullified temperature
