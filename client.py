@@ -618,6 +618,7 @@ def render_client_portal():
         st.warning("⚠️ No approved data records available yet.")
         return
 
+    # Clean the baseline telemetry data
     master_df = master_df[(master_df['temperature'] >= -30.0) & (master_df['temperature'] <= 120.0)]
     master_df = master_df[
         (~master_df['Location'].str.upper().str.contains('OFFICE')) &
@@ -628,12 +629,18 @@ def render_client_portal():
     proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
     master_df['Project'] = master_df['Project'].astype(str).str.strip()
     
+    # Client visual settings
+    show_theoretical = True
+    show_ambient = True
+    show_elevation = False
+    show_as_built = True
+    weeks_view = 6
+
     # ===============================================================
     # --- DYNAMIC PHASE & SYSTEM FILTERS ---
     # ===============================================================
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Extract phases dynamically from the explicit Phase column
     available_phases = []
     if 'Phase' in master_df.columns:
         available_phases = sorted(
@@ -647,35 +654,29 @@ def render_client_portal():
     # 1. PHASE SELECTOR
     if len(available_phases) > 1:
         selected_phase = st.selectbox("📂 **Select Project Phase:**", available_phases)
-        # Force the dataframe to drop all graphs not in this specific phase
         full_p_df = full_p_df[full_p_df['Phase'].astype(str) == str(selected_phase).strip()]
     elif len(available_phases) == 1:
         selected_phase = available_phases[0]
-        # Even if there's only 1 phase, filter to it just to be clean
         full_p_df = full_p_df[full_p_df['Phase'].astype(str) == str(selected_phase).strip()]
 
     # 2. SYSTEM SELECTOR
     available_systems = []
     if not full_p_df.empty and 'System' in full_p_df.columns:
-        # Get systems only for the currently filtered Phase
         available_systems = sorted(
             [str(s) for s in full_p_df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']], 
             key=natural_sort_key
         )
         
-        # Only show the System dropdown if 2 or more exist
         if len(available_systems) > 1:
             selected_systems = st.multiselect(
-                f"⚙️ **Filter by System:** (Leave blank to view all systems in {selected_phase})", 
+                f"⚙️ **Filter by System:** (Leave blank to view all systems in {selected_phase if selected_phase else 'project'})", 
                 options=available_systems, 
                 default=[]  
             )
             
-            # Slice the dataframe again if the client picked specific systems
             if selected_systems:
                 full_p_df = full_p_df[full_p_df['System'].astype(str).isin(selected_systems)]
 
-    # Draw a horizontal line ONLY if at least one of the UI menus was displayed
     if len(available_phases) > 1 or len(available_systems) > 1:
         st.markdown("<hr>", unsafe_allow_html=True)
         
@@ -683,47 +684,29 @@ def render_client_portal():
         st.error("❌ No data found for the selected Phase/System filters.")
         st.stop()
 
+    # --- AMBIENT DATA INJECTION ---
+    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+    ambient_data_global = master_df[ambient_mask_master].copy()
+    
+    if not full_p_df.empty:
+        ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
+        if not ambient_data_global.empty and not ambient_mask_phase.any():
+            full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
+
     # --- REGISTRY METADATA LOOKUP ---
-    phase_row = proj_registry.iloc[[0]] # Default to the root job entry
+    phase_row = proj_registry.iloc[[0]] # Default to root job entry
     if selected_phase:
-        # If your registry has specific rows for phases (e.g., "2538-Phase1"), try to match it
+        # Match phase dynamically if recorded in registry
         specific_row = proj_registry[proj_registry['Project'].str.contains(str(selected_phase), case=False, na=False)]
         if not specific_row.empty:
             phase_row = specific_row
 
     primary_meta = phase_row.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
+    display_name = primary_meta.get('ProjectName', selected_phase if selected_phase else f"Project {root_job_id}")
     
-    # Append the Phase name to the main title if it isn't already in the project name
     if selected_phase and str(selected_phase).lower() not in str(display_name).lower():
         display_name = f"{display_name} - {selected_phase}"
-        
-    local_tz = primary_meta.get('Timezone', 'US/Pacific')
-    
-    # --- AMBIENT DATA INJECTION (Unchanged) ---
-    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    ambient_data_global = master_df[ambient_mask_master].copy()
-  
-    if not full_p_df.empty:
-        ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-        if not ambient_data_global.empty and not ambient_mask_phase.any():
-            full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
-            
-    if full_p_df.empty:
-        st.error(f"❌ **Data Mismatch Detected!**")
-        st.warning(f"The dropdown is looking for phase: `{target_phase_clean}`")
-        st.info("But the telemetry database only contains the following Project IDs:")
-        st.write(master_df['Project'].unique())
-        st.stop() 
 
-    proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
-    phase_row = proj_registry[proj_registry['Project'] == target_phase_clean]
-    
-    if phase_row.empty:
-        phase_row = proj_registry.iloc[[0]]
-
-    primary_meta = phase_row.iloc[0].to_dict()
-    display_name = primary_meta.get('ProjectName', selected_phase)
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz).date()
@@ -733,10 +716,6 @@ def render_client_portal():
         f_start_date = pd.to_datetime(primary_meta.get('Date_Freezedown')).date()
         days_since = (now_local - f_start_date).days
         day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
-
-    if full_p_df.empty:
-        st.warning(f"⚠️ No approved data records available for phase {selected_phase}.")
-        return
 
     st.title(f"📊 {display_name}")
     
@@ -762,7 +741,6 @@ def render_client_portal():
         raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
         locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
         
-        # --- NEW: Fetch all map coordinates ONCE before the loop for speed ---
         try:
             map_query = f"""
                 SELECT Project, Location, Map_X, Map_Y, Image_Name 
@@ -773,7 +751,6 @@ def render_client_portal():
         except Exception as e:
             df_all_locs = pd.DataFrame()
             st.error(f"⚠️ BigQuery Table Error: {e}")
-        # ---------------------------------------------------------------------
 
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
@@ -790,7 +767,6 @@ def render_client_portal():
                     if pd.notnull(raw_phase_fd):
                         loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
                         
-                # Hardcoded exact 6-week window lookup
                 loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
                 
                 if loc_f_start_date:
@@ -805,15 +781,13 @@ def render_client_portal():
                     any(x in loc_upper for x in ['SUPPLY', 'RETURN', 'BRINE', 'BANK'])
                 )
                 
-                graph_curve_id = None if is_brine_pipe else f"{selected_phase}-{loc}"
+                graph_curve_id = None if is_brine_pipe else f"{matched_project_id}-{loc}"
                 target_ambient = ambient_df if is_brine_pipe else None
 
-                # Check if this specific location exists in the TempPipeLoc dataframe
                 has_map = False
                 if not df_all_locs.empty and 'Location' in df_all_locs.columns:
                     has_map = str(loc) in df_all_locs['Location'].astype(str).values
                 
-                # --- APPLY SPLIT LAYOUT OR FULL GRAPH ---
                 if has_map and show_as_built:
                     col_chart, col_map = st.columns([3, 1])
 
@@ -849,7 +823,6 @@ def render_client_portal():
                             st.info(f"🗺️ Map image for {root_job_id} not found in the as_builts folder.")
                 
                 else:
-                    # Full width layout if map toggle is off or coordinates don't exist
                     fig = build_high_speed_graph(
                         df=loc_data, 
                         title=f"{loc} History", 
@@ -885,7 +858,6 @@ def render_client_portal():
                      st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
                 else:
                     for filename in asbuilt_filenames:
-                        # --- UPDATED: Now points to the correct "as_builts" folder ---
                         possible_paths = [
                             os.path.join("as_builts", filename), 
                             filename
