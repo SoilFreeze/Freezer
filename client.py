@@ -50,7 +50,6 @@ PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
 NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_synced"
 
 # --- CORE UTILITIES ---
-
 @st.cache_resource
 def get_bq_client():
     try:
@@ -847,7 +846,7 @@ def render_client_portal():
                     st.plotly_chart(fig, use_container_width=True)
 
     with tabs[2]:
-        render_depth_profile_tab(full_p_df, "°F", local_tz)
+        render_depth_profile_tab(full_p_df, "°F", local_tz, orientation=p_orientation)
     
     with tabs[3]:
         st.subheader("📋 24-Hour Pipe Summary Table")
