@@ -736,19 +736,33 @@ def render_client_portal():
             full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
 
     # --- REGISTRY METADATA LOOKUP ---
-    phase_row = proj_registry.iloc[[0]] 
+    # Isolate the root project row (e.g. "2527") 
+    root_row = proj_registry[proj_registry['Project'].astype(str).str.strip() == root_job_id]
+    if root_row.empty:
+        root_row = proj_registry.iloc[[0]]
+
+    # Isolate the phase row (e.g. "2527-Phase 1")
+    phase_row = root_row 
     if selected_phase:
         specific_row = proj_registry[proj_registry['Project'].str.contains(str(selected_phase), case=False, na=False)]
         if not specific_row.empty:
             phase_row = specific_row
 
     primary_meta = phase_row.iloc[0].to_dict()
+    root_meta = root_row.iloc[0].to_dict()
     
-    # 1. DEFINE IT HERE: Extract orientation safely
+    # 1. EXTRACT ORIENTATION SAFELY (With fallback to the root project row!)
     p_orientation = "vertical"
-    raw_val = primary_meta.get("Orientation") or primary_meta.get("orientation")
-    if pd.notnull(raw_val):
-        p_orientation = raw_val
+    
+    # Check the specific phase row first
+    raw_val = primary_meta.get("Orientation") if pd.notnull(primary_meta.get("Orientation")) else primary_meta.get("orientation")
+    
+    # If the phase row is blank, fall back to checking the main root row
+    if pd.isnull(raw_val) or str(raw_val).strip() == "":
+        raw_val = root_meta.get("Orientation") if pd.notnull(root_meta.get("Orientation")) else root_meta.get("orientation")
+        
+    if pd.notnull(raw_val) and str(raw_val).strip():
+        p_orientation = str(raw_val).strip().lower()
         
     raw_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
     # Truncate "- Phase 2" or similar from the master project title so it is perfectly clean
