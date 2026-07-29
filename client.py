@@ -797,8 +797,15 @@ def render_client_portal():
         root_row = proj_registry.iloc[[0]]
 
     phase_row = root_row 
-    if selected_phase:
-        specific_row = proj_registry[proj_registry['Project'].str.contains(str(selected_phase), case=False, na=False)]
+    if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
+        phase_num_clean = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
+        
+        # STRICT MATCHING: Prevents the "1" in "2541" from accidentally matching Phase 2
+        specific_row = proj_registry[
+            proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(phase_num_clean)}$', na=False) |
+            proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(phase_num_clean)}\b', na=False)
+        ]
+        
         if not specific_row.empty:
             phase_row = specific_row
 
