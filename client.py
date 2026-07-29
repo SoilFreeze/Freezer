@@ -744,6 +744,12 @@ def render_client_portal():
 
     primary_meta = phase_row.iloc[0].to_dict()
     
+    # 1. DEFINE IT HERE: Extract orientation safely
+    p_orientation = "vertical"
+    raw_val = primary_meta.get("Orientation") or primary_meta.get("orientation")
+    if pd.notnull(raw_val):
+        p_orientation = raw_val
+        
     raw_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
     # Truncate "- Phase 2" or similar from the master project title so it is perfectly clean
     base_project_name = re.split(r'(?i)\s*-\s*Phase', raw_project_name)[0].strip()
@@ -757,6 +763,7 @@ def render_client_portal():
         st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
     tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
+    
     
     with tabs[0]:
         render_summary_tab(master_df, "°F", local_tz, base_project_name, proj_registry)
@@ -847,10 +854,6 @@ def render_client_portal():
 
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz, orientation=p_orientation)
-            p_orientation = "vertical"
-            raw_val = primary_meta.get("Orientation") or primary_meta.get("orientation")
-            if pd.notnull(raw_val):
-                p_orientation = raw_val
     
     with tabs[3]:
         st.subheader("📋 24-Hour Pipe Summary Table")
