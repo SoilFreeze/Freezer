@@ -91,13 +91,79 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     # --- 4. RENDER ENGINE: Iterate over the exact control list ---
     for _, row in active_projs.iterrows():
         p_project = str(row['Project']).strip()
+        
+        # 1. Obey the dropdown if a single project is selected
+        if selected_project and selected_project != "All Projects":
+            if p_project != selected_project:
+                continue
+                
         p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
         
         is_active = str(row.get('ShowActive', 'FALSE')).strip().upper() in ['TRUE', 'YES', '1']
         p_status = str(row.get('ProjectStatus', 'Archived')).strip()
         if not p_status or p_status.lower() in ['nan', 'none']:
             p_status = "Archived"
-        
+            
+        # ====================================================================
+        # DATE CALCULATION LOGIC (Moved up so Archived projects get it)
+        # ====================================================================
+        f_date = row.get('Date_Freezedown')
+        m_date = row.get('Date_Maintenance') 
+
+        def is_valid_date(val):
+            if pd.isnull(val): return False
+            val_str = str(val).strip().lower()
+            if val_str in ['', 'nan', 'nat', 'none', '<na>']: return False
+            return True
+
+        header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
+
+        if is_valid_date(f_date):
+            f_date_dt = pd.to_datetime(f_date).date()
+            f_date_display = f_date_dt.strftime('%b %d, %Y')
+            
+            total_freezedown_days = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
+            
+            if is_valid_date(m_date):
+                m_date_dt = pd.to_datetime(m_date).date()
+                m_date_display = m_date_dt.strftime('%b %d, %Y')
+                
+                time_to_freeze = (m_date_dt - f_date_dt).days
+                maintenance_days = (pd.Timestamp.now(tz=display_tz).date() - m_date_dt).days
+                
+                header_html = f"""
+                    <div style='text-align: right; line-height: 1.3;'>
+                        🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
+                        <small style='color: #666;'>Start Freezedown: {f_date_display}</small><br>
+                        <span style='color: #28a745; display: inline-block; margin-top: 4px;'>✅ <b>Full Freezedown Provided</b></span><br>
+                        <small style='color: #666;'>
+                            Start Maintenance: {m_date_display}<br>
+                            Time to Freeze: {max(0, time_to_freeze)} Days | In Maintenance: {max(0, maintenance_days)} Days
+                        </small>
+                    </div>
+                """
+            else:
+                header_html = f"""
+                    <div style='text-align: right; line-height: 1.3;'>
+                        🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
+                        <small style='color: #666;'>Start Freezedown: {f_date_display}</small>
+                    </div>
+                """
+
+        # ====================================================================
+        # ARCHIVED PROJECT SHORT-CIRCUIT
+        # ====================================================================
+        if not is_active:
+            with st.container(border=True):
+                h1, h2 = st.columns([2, 1])
+                h1.subheader(f"📦 {p_name}")
+                h1.markdown(f"**Project Status:** `{p_status}`")
+                h2.markdown(header_html, unsafe_allow_html=True)
+            continue # <--- Skip all telemetry math! Jump to the next project.
+            
+        # ====================================================================
+        # ACTIVE PROJECT TELEMETRY MATH
+        # ====================================================================
         job_num = p_project.split('-')[0].strip()
         
         target_phase = ""
@@ -150,61 +216,73 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             if sys: title_ext.append(f"System {sys}")
             title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
 
-            # --- DATE CALCULATION LOGIC ---
-            f_date = row.get('Date_Freezedown')
-            m_date = row.get('Date_Maintenance') 
-
-            def is_valid_date(val):
-                if pd.isnull(val): return False
-                val_str = str(val).strip().lower()
-                if val_str in ['', 'nan', 'nat', 'none', '<na>']: return False
-                return True
-
-            header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
-
-            if is_valid_date(f_date):
-                f_date_dt = pd.to_datetime(f_date).date()
-                f_date_display = f_date_dt.strftime('%b %d, %Y')
+            # Render the standard Active Project Card
+            with st.container(border=True):
+                h1, h2 = st.columns([2, 1])
+                h1.subheader(f"🏗️ {p_name}{title_suffix}")
                 
-                total_freezedown_days = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
+                h2.markdown(header_html, unsafe_allow_html=True)
                 
-                if is_valid_date(m_date):
-                    m_date_dt = pd.to_datetime(m_date).date()
-                    m_date_display = m_date_dt.strftime('%b %d, %Y')
+                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
+                
+                # --- HARDWARE & DATA AGE LOGIC ---
+                if not sys_tel.empty:
+                    active_1h = sys_tel[sys_tel['checkins_1h'] > 0]['NodeNum'].nunique()
+                    active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
+                    active_24h = sys_tel[sys_tel['checkins_24h'] > 0]['NodeNum'].nunique()
                     
-                    time_to_freeze = (m_date_dt - f_date_dt).days
-                    maintenance_days = (pd.Timestamp.now(tz=display_tz).date() - m_date_dt).days
-                    
-                    header_html = f"""
-                        <div style='text-align: right; line-height: 1.3;'>
-                            🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
-                            <small style='color: #666;'>Start Freezedown: {f_date_display}</small><br>
-                            <span style='color: #28a745; display: inline-block; margin-top: 4px;'>✅ <b>Full Freezedown Provided</b></span><br>
-                            <small style='color: #666;'>
-                                Start Maintenance: {m_date_display}<br>
-                                Time to Freeze: {max(0, time_to_freeze)} Days | In Maintenance: {max(0, maintenance_days)} Days
-                            </small>
-                        </div>
-                    """
+                    latest_ts = sys_tel['latest_ts'].max()
+                    if pd.notnull(latest_ts):
+                        now_utc = pd.Timestamp.now(tz='UTC')
+                        elapsed_mins = int((now_utc - latest_ts).total_seconds() / 60)
+                        
+                        if elapsed_mins <= 60:
+                            pulse = f"🟢 **Live** ({elapsed_mins}m ago)"
+                        elif elapsed_mins <= 180:
+                            pulse = f"🟠 **Delayed** ({elapsed_mins}m ago)"
+                        else:
+                            pulse = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
+                            
+                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts.strftime('%b %d, %H:%M UTC')})*"
+                    else:
+                        data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                 else:
-                    header_html = f"""
-                        <div style='text-align: right; line-height: 1.3;'>
-                            🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
-                            <small style='color: #666;'>Start Freezedown: {f_date_display}</small>
-                        </div>
-                    """
+                    active_1h = active_6h = active_24h = 0
+                    data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
+                
+                status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
+                
+                st.markdown(
+                    f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
+                    f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
+                    f"Assigned Pool: `{total_assigned}`<br>"
+                    f"{data_age_str}",
+                    unsafe_allow_html=True
+                )
+                st.divider() 
 
-            # ====================================================================
-            # RENDER THE CONTAINER 
-            # ====================================================================
-            if not is_active:
-                # Render the streamlined Archived Project Card
-                with st.container(border=True):
-                    h1, h2 = st.columns([2, 1])
-                    h1.subheader(f"📦 {p_name}{title_suffix}")
-                    h1.markdown(f"**Project Status:** `{p_status}`")
-                    h2.markdown(header_html, unsafe_allow_html=True)
-                continue # Skip the telemetry logic for archived projects
+                if sys_tel.empty:
+                    st.info(f"No recent telemetry received for {p_project}{title_suffix}.")
+                    continue
+
+                is_amb_col = sys_tel['Location'].astype(str).str.upper() == 'AMBIENT'
+                is_tp_col = sys_tel['Depth'].notnull() & (sys_tel['Depth'].astype(str).str.strip() != '') & ~is_amb_col
+                is_s_col = (sys_tel['Bank'].astype(str).str.startswith('S') | sys_tel['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
+                is_r_col = (sys_tel['Bank'].astype(str).str.startswith('R') | sys_tel['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
+
+                groups_data = [
+                    ("📥 Supply", sys_tel[is_s_col], -10), 
+                    ("📤 Return", sys_tel[is_r_col], 0), 
+                    ("📏 TempPipes", sys_tel[is_tp_col], 32)
+                ]
+
+                if st.session_state.get("global_show_ambient", True):
+                    groups_data.append(("☁️ Ambient", sys_tel[is_amb_col], None))
+
+                cols = st.columns(len(groups_data))
+                for idx, (title, g_df, target_temp) in enumerate(groups_data):
+                    with cols[idx]:
+                        render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label)
 
             # Render the standard Active Project Card
             with st.container(border=True):
