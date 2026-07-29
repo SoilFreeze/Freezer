@@ -525,8 +525,11 @@ def render_pipe_summary_table(full_p_df, unit_label, local_tz):
         
     st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
-def render_depth_profile_tab(full_p_df, unit_label, local_tz):
-    st.subheader("📏 Vertical Temperature Profile")
+def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="vertical"):
+    is_horizontal = str(orientation).strip().lower() == "horizontal"
+    chart_type_label = "Distance" if is_horizontal else "Depth"
+    
+    st.subheader(f"📏 {'Horizontal' if is_horizontal else 'Vertical'} Temperature Profile")
     lookback_weeks = 6 
 
     df_local = full_p_df.copy()
@@ -550,7 +553,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
     locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
 
     for loc in locations:
-        with st.expander(f"📍 Temp vs Depth - {loc}", expanded=True):
+        with st.expander(f"📍 Temp vs {chart_type_label} - {loc}", expanded=True):
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
@@ -569,10 +572,16 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                     .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
+                
+                # Dynamic Axes for Baseline
+                x_base = snap_b['Depth_Num'] if is_horizontal else snap_b['temperature']
+                y_base = snap_b['temperature'] if is_horizontal else snap_b['Depth_Num']
+                ht_base = f"Baseline: {baseline_date_str}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+                
                 fig.add_trace(go.Scatter(
-                    x=snap_b['temperature'], y=snap_b['Depth_Num'], mode='lines', 
+                    x=x_base, y=y_base, mode='lines', 
                     name=f'Baseline ({baseline_date_str})', line=dict(color='black', width=2.5, dash='dash'),
-                    hovertemplate=f"Baseline: {baseline_date_str}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                    hovertemplate=ht_base
                 ))
 
             for m_date in mondays:
@@ -594,35 +603,48 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz):
                         .drop_duplicates('NodeNum')
                         .sort_values('Depth_Num')
                     )
+                    
+                    # Dynamic Axes for Weekly Snaps
+                    x_snap = snap_w['Depth_Num'] if is_horizontal else snap_w['temperature']
+                    y_snap = snap_w['temperature'] if is_horizontal else snap_w['Depth_Num']
+                    ht_snap = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+
                     fig.add_trace(go.Scatter(
-                        x=snap_w['temperature'], y=snap_w['Depth_Num'], mode='lines+markers', 
+                        x=x_snap, y=y_snap, mode='lines+markers', 
                         name=current_loop_date, line=dict(shape='spline', smoothing=1.1, width=1.5), marker=dict(size=4),
-                        hovertemplate=f"Date: {current_loop_date}<br>Depth: %{{y}}ft<br>Temp: %{{x:.1f}}{unit_label}<extra></extra>"
+                        hovertemplate=ht_snap
                     ))
 
-            fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
+            # Swap Threshold line orientation
+            if is_horizontal:
+                fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
+            else:
+                fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
+
             max_depth = loc_data['Depth_Num'].max()
-            y_limit = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
+            limit_val = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
+
+            # Dynamic Grid styling
+            dist_axis = dict(
+                title=f"{chart_type_label} (ft)", range=[0, limit_val] if is_horizontal else [limit_val, 0], dtick=10,
+                minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+                gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
+            )
+            temp_axis = dict(
+                title=f"Temperature ({unit_label})", range=[-20, 80], dtick=10,
+                minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
+                gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
+            )
 
             fig.update_layout(
-                title=f"<b>Temp vs Depth - {loc}</b>", 
+                title=f"<b>Temp vs {chart_type_label} - {loc}</b>", 
                 plot_bgcolor='white', 
                 height=800,
-                xaxis=dict(
-                    title=f"Temperature ({unit_label})", range=[-20, 80], dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
-                ),
-                yaxis=dict(
-                    title="Depth (ft)", range=[y_limit, 0], dtick=10,
-                    minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                    gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
-                ),
-                # Pushed the y-coordinate from -0.1 to -0.18 to create a comfortable gap below the axis title
+                xaxis=dist_axis if is_horizontal else temp_axis,
+                yaxis=temp_axis if is_horizontal else dist_axis,
                 legend=dict(orientation="h", y=-0.18, xanchor="center", x=0.5)
             )
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}", theme=None)
-
 def render_client_portal():
     client = get_bq_client()
     if client is None: return
