@@ -809,9 +809,11 @@ def render_client_portal():
     # THE BULLETPROOF EXTRACTOR 
     # ===============================================================
     def get_orient(meta_dict):
-        val = meta_dict.get("Orientation", meta_dict.get("orientation"))
-        if pd.notnull(val) and str(val).strip().lower() not in ['nan', 'none', '']:
-            return str(val).strip().lower()
+        # Loop through every column to find orientation, ignoring case entirely
+        for key, val in meta_dict.items():
+            if str(key).lower() == 'orientation':
+                if pd.notnull(val) and str(val).strip().lower() not in ['nan', 'none', '']:
+                    return str(val).strip().lower()
         return None
         
     # Safely checks the Phase Row, then Root Row, then defaults to vertical
@@ -819,8 +821,16 @@ def render_client_portal():
         
     raw_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
     base_project_name = re.split(r'(?i)\s*-\s*Phase', raw_project_name)[0].strip()
-    
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
+    
+    st.title(f"📊 {base_project_name}")
+
+    # --- 🛑 TEMPORARY DEBUG BLOCK (Delete once it's working) ---
+    st.warning(f"🔧 **DEBUG:** App believes this project is: **{p_orientation.upper()}**")
+    with st.expander("🔧 Click to see raw BigQuery Metadata"):
+        st.write("If you don't see 'orientation' in this list, BigQuery isn't sending it to client.py:")
+        st.json(primary_meta)
+    # -----------------------------------------------------------
     
     st.title(f"📊 {base_project_name}")
     
