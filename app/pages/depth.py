@@ -24,13 +24,43 @@ def render_depth_charts(selected_project, unit_label, display_tz, orientation="v
         st.info(f"💡 Please select a specific project in the sidebar to view {chart_type_label.lower()} profiles.")
         return
 
-    # THE FIX: Stop using a local slider. Read the global one from the sidebar.
-    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
-    st.sidebar.caption(f"📏 {chart_type_label} Charts using Global {lookback_weeks}-week window.")
+    # --- FIX: SEPARATE CHART DISPLAY WINDOW FROM DATA FETCH WINDOW ---
     
-    with st.spinner("Fetching historical telemetry..."):
-        p_df = get_universal_portal_data(selected_project)
+    # 1. Read the slider to determine how many lines to draw on the chart
+    lookback_weeks = st.session_state.get("global_lookback_weeks_slider", 5)
+    st.sidebar.caption(f"📏 {chart_type_label} Charts displaying the last {lookback_weeks} weeks.")
+    
+    # 2. Calculate the exact days back to Freezedown to ensure we capture the True Baseline
+    p_meta = st.session_state.get('project_metadata') or {}
+    real_f_date = p_meta.get('Date_Freezedown')
+    now_utc = pd.Timestamp.now(tz='UTC')
+    
+    # The minimum data we need to fetch is whatever the slider is set to
+    fetch_days = lookback_weeks * 7 
+    
+    if pd.notnull(real_f_date):
+        parsed_f_date = pd.to_datetime(real_f_date)
+        if parsed_f_date.tzinfo is None:
+            parsed_f_date = parsed_f_date.tz_localize('UTC')
         
+        days_since_freeze = (now_utc - parsed_f_date).days
+        # If freezedown was 200 days ago, force BigQuery to fetch 200 days of data
+        if days_since_freeze > fetch_days:
+            fetch_days = days_since_freeze + 2
+
+    with st.spinner("Fetching historical telemetry..."):
+        # 3. Pass fetch_days into the portal function so it doesn't default to a small window
+        try:
+            p_df = get_universal_portal_data(
+                selected_project, 
+                lookback_days=fetch_days,
+                show_masked=st.session_state.get('global_show_masked', False),
+                show_baddata=st.session_state.get('global_show_baddata', False)
+            )
+        except TypeError:
+            # Fallback just in case the processor doesn't accept the new arguments
+            p_df = get_universal_portal_data(selected_project)
+            
     if p_df is None or p_df.empty:
         st.warning("No data found for this project.")
         return
