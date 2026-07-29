@@ -528,7 +528,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
     is_horizontal = str(orientation).strip().lower() == "horizontal"
     chart_type_label = "Distance" if is_horizontal else "Depth"
     
-    st.subheader(f"📏 {'Horizontal' if is_horizontal else 'Vertical'} Temperature Profile")
+    st.subheader(f"📏 {chart_type_label} Profile Analysis")
     lookback_weeks = 6 
 
     df_local = full_p_df.copy()
@@ -548,7 +548,10 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
 
     freeze_pt = 32
     now_utc = pd.Timestamp.now(tz='UTC')
-    mondays = pd.date_range(end=now_utc, periods=lookback_weeks, freq='W-MON')
+    
+    cutoff_date = now_utc - pd.Timedelta(weeks=lookback_weeks)
+    mondays = pd.date_range(start=cutoff_date, end=now_utc, freq='W-MON')
+    
     locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
 
     for loc in locations:
@@ -556,6 +559,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
             loc_data = depth_df[depth_df['Location'] == loc].copy()
             fig = go.Figure()
 
+            # --- A. BASELINE Snapshots ---
             baseline_ts = loc_data['timestamp'].min()
             b_window = loc_data[
                 (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
@@ -563,31 +567,52 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
             ]
 
             baseline_date_str = ""
+            snap_base = pd.DataFrame()
             if not b_window.empty:
                 baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
-                snap_b = (
+                snap_base = (
                     b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
                     .sort_values(['NodeNum', 'diff'])
                     .drop_duplicates('NodeNum')
                     .sort_values('Depth_Num')
                 )
-                
-                # Dynamic Axes for Baseline
-                x_base = snap_b['Depth_Num'] if is_horizontal else snap_b['temperature']
-                y_base = snap_b['temperature'] if is_horizontal else snap_b['Depth_Num']
-                ht_base = f"Baseline: {baseline_date_str}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
-                
-                fig.add_trace(go.Scatter(
-                    x=x_base, y=y_base, mode='lines', 
-                    name=f'Baseline ({baseline_date_str})', line=dict(color='black', width=2.5, dash='dash'),
-                    hovertemplate=ht_base
-                ))
 
+            # --- B. RECENT 6 AM Snapshots ---
+            loc_data['date_str'] = loc_data['timestamp'].dt.strftime('%Y-%m-%d')
+            loc_data['hour_int'] = loc_data['timestamp'].dt.hour
+            
+            recent_6am_date_str = ""
+            recent_profile_rows = []
+            
+            if not loc_data.empty:
+                sorted_all_dates = sorted(loc_data['date_str'].unique(), reverse=True)
+                for candidate_date in sorted_all_dates:
+                    if candidate_date == baseline_date_str:
+                        continue
+                    
+                    day_pool = loc_data[loc_data['date_str'] == candidate_date]
+                    if day_pool.empty:
+                        continue
+                        
+                    recent_6am_date_str = candidate_date
+                    for node_id, node_group in day_pool.groupby('NodeNum'):
+                        exact_6am = node_group[node_group['hour_int'] == 6]
+                        if not exact_6am.empty:
+                            recent_profile_rows.append(exact_6am.sort_values('timestamp').iloc[-1])
+                        else:
+                            node_group = node_group.assign(hour_dist=(node_group['hour_int'] - 6).abs())
+                            best_fallback_row = node_group.sort_values(by=['hour_dist', 'timestamp']).iloc[0]
+                            recent_profile_rows.append(best_fallback_row)
+                    break
+
+            snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
+
+            # --- C. HISTORICAL SNAPSHOTS ---
             for m_date in mondays:
-                target_ts = m_date.replace(hour=6, minute=0, second=0)
+                target_ts = m_date.tz_convert(local_tz).replace(hour=6, minute=0, second=0)
                 current_loop_date = target_ts.strftime('%Y-%m-%d')
 
-                if current_loop_date == baseline_date_str:
+                if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
                     continue
 
                 window = loc_data[
@@ -596,25 +621,54 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
                 ]
 
                 if not window.empty:
-                    snap_w = (
+                    snap_week = (
                         window.assign(diff=(window['timestamp'] - target_ts).abs())
                         .sort_values(['NodeNum', 'diff'])
                         .drop_duplicates('NodeNum')
                         .sort_values('Depth_Num')
                     )
                     
-                    # Dynamic Axes for Weekly Snaps
-                    x_snap = snap_w['Depth_Num'] if is_horizontal else snap_w['temperature']
-                    y_snap = snap_w['temperature'] if is_horizontal else snap_w['Depth_Num']
-                    ht_snap = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+                    # DYNAMIC AXES
+                    x_week = snap_week['Depth_Num'] if is_horizontal else snap_week['temperature']
+                    y_week = snap_week['temperature'] if is_horizontal else snap_week['Depth_Num']
+                    ht_week = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
 
                     fig.add_trace(go.Scatter(
-                        x=x_snap, y=y_snap, mode='lines+markers', 
+                        x=x_week, y=y_week, mode='lines+markers', 
                         name=current_loop_date, line=dict(shape='spline', smoothing=1.1, width=1.5), marker=dict(size=4),
-                        hovertemplate=ht_snap
+                        hovertemplate=ht_week
                     ))
 
-            # Swap Threshold line orientation
+            # --- D. INJECT THE MOST RECENT LINE ---
+            if not snap_recent.empty:
+                x_rec = snap_recent['Depth_Num'] if is_horizontal else snap_recent['temperature']
+                y_rec = snap_recent['temperature'] if is_horizontal else snap_recent['Depth_Num']
+                ht_rec = f"Most Recent: %{{text}}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+
+                fig.add_trace(go.Scatter(
+                    x=x_rec, y=y_rec, mode='lines+markers',
+                    name=f'<b>Most Recent ({recent_6am_date_str} 6AM*)</b>',
+                    line=dict(color='#ff7f0e', width=3.5, shape='spline', smoothing=1.1),
+                    marker=dict(size=6, color='#ff7f0e'),
+                    hovertemplate=ht_rec,
+                    text=snap_recent['timestamp'].dt.strftime('%b %d, %H:%M')
+                ))
+
+            # --- E. INJECT BASELINE ---
+            if not snap_base.empty:
+                x_base = snap_base['Depth_Num'] if is_horizontal else snap_base['temperature']
+                y_base = snap_base['temperature'] if is_horizontal else snap_base['Depth_Num']
+                ht_base = f"Baseline: {baseline_date_str}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
+
+                fig.add_trace(go.Scatter(
+                    x=x_base, y=y_base, mode='lines+markers', 
+                    name=f'<b>Baseline ({baseline_date_str})</b>',
+                    line=dict(color='black', width=3, dash='dash'),
+                    marker=dict(size=5, color='black'),
+                    hovertemplate=ht_base
+                ))
+
+            # FLIP THRESHOLD LINE
             if is_horizontal:
                 fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
             else:
@@ -623,7 +677,7 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
             max_depth = loc_data['Depth_Num'].max()
             limit_val = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
 
-            # Dynamic Grid styling
+            # DYNAMIC LAYOUT
             dist_axis = dict(
                 title=f"{chart_type_label} (ft)", range=[0, limit_val] if is_horizontal else [limit_val, 0], dtick=10,
                 minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
@@ -639,11 +693,13 @@ def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="verti
                 title=f"<b>Temp vs {chart_type_label} - {loc}</b>", 
                 plot_bgcolor='white', 
                 height=800,
+                margin=dict(l=60, r=40, t=80, b=80), 
                 xaxis=dist_axis if is_horizontal else temp_axis,
                 yaxis=temp_axis if is_horizontal else dist_axis,
-                legend=dict(orientation="h", y=-0.18, xanchor="center", x=0.5)
+                legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
             )
             st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}", theme=None)
+            
 def render_client_portal():
     client = get_bq_client()
     if client is None: return
