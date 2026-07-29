@@ -8,13 +8,12 @@ from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER
 ##############################
 # Page 1 - Dashboard Summary #
 ##############################
-# Make sure your function signature at the top accepts selected_project!
 def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz):
     """
     Renders Global Active Project Summary.
     Driven by the Project Registry to ensure active projects show up even if offline.
     """
-    if selected_project is None:
+    if selected_project is None or selected_project == "All Projects":
         st.header("🌐 Global Active Project Summary")
     else:
         st.header(f"🏗️ Summary: {selected_project}")
@@ -22,16 +21,21 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     client = get_bq_client()
     if client is None: return
 
-    # --- 1. THE CONTROL LIST: Active Projects Only (ALWAYS GLOBAL) ---
+    # --- 1. THE CONTROL LIST: Dynamic based on Sidebar Toggle ---
+    show_archived = st.session_state.get('global_show_archived', False)
+    status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+
     proj_q = f"""
         SELECT 
             CAST(Project AS STRING) as Project, 
             ProjectName, 
+            ProjectStatus,
+            ShowActive,
             Date_Freezedown, 
             Date_Maintenance 
         FROM `{PROJECT_REGISTRY_TABLE}`
-        WHERE UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')
-          AND UPPER(Project) NOT LIKE '%OFFICE%'
+        WHERE UPPER(Project) NOT LIKE '%OFFICE%'
+          {status_filter}
         ORDER BY Project
     """
     try: 
@@ -40,7 +44,7 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         return st.error(f"Project Registry failed: {e}")
 
     if active_projs.empty:
-        return st.info("No active projects found in registry.")
+        return st.info("No projects found in registry.")
 
     # --- 2. INVENTORY POOL: Total assigned hardware ---
     pool_q = f"""
@@ -88,7 +92,11 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     for _, row in active_projs.iterrows():
         p_project = str(row['Project']).strip()
         p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
-        f_date = row['Date_Freezedown']
+        
+        is_active = str(row.get('ShowActive', 'FALSE')).strip().upper() in ['TRUE', 'YES', '1']
+        p_status = str(row.get('ProjectStatus', 'Archived')).strip()
+        if not p_status or p_status.lower() in ['nan', 'none']:
+            p_status = "Archived"
         
         job_num = p_project.split('-')[0].strip()
         
@@ -116,7 +124,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             ]
 
         for sys in systems:
-            # THE UPGRADE: Include Ambient sensors in the registry pool math for this block
             if sys == "":
                 block_pool = pool_matches
             else:
@@ -144,7 +151,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
 
             # --- DATE CALCULATION LOGIC ---
-            # --- SEAMLESS DATE LOGIC ---
             f_date = row.get('Date_Freezedown')
             m_date = row.get('Date_Maintenance') 
 
@@ -160,14 +166,12 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                 f_date_dt = pd.to_datetime(f_date).date()
                 f_date_display = f_date_dt.strftime('%b %d, %Y')
                 
-                # ALWAYS calculate the total time since the project started freezing
                 total_freezedown_days = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
                 
                 if is_valid_date(m_date):
                     m_date_dt = pd.to_datetime(m_date).date()
                     m_date_display = m_date_dt.strftime('%b %d, %Y')
                     
-                    # Calculate durations for the specific phases
                     time_to_freeze = (m_date_dt - f_date_dt).days
                     maintenance_days = (pd.Timestamp.now(tz=display_tz).date() - m_date_dt).days
                     
@@ -183,7 +187,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                         </div>
                     """
                 else:
-                    # Active freezedown (no maintenance yet)
                     header_html = f"""
                         <div style='text-align: right; line-height: 1.3;'>
                             🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
@@ -194,11 +197,20 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             # ====================================================================
             # RENDER THE CONTAINER 
             # ====================================================================
+            if not is_active:
+                # Render the streamlined Archived Project Card
+                with st.container(border=True):
+                    h1, h2 = st.columns([2, 1])
+                    h1.subheader(f"📦 {p_name}{title_suffix}")
+                    h1.markdown(f"**Project Status:** `{p_status}`")
+                    h2.markdown(header_html, unsafe_allow_html=True)
+                continue # Skip the telemetry logic for archived projects
+
+            # Render the standard Active Project Card
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
                 h1.subheader(f"🏗️ {p_name}{title_suffix}")
                 
-                # Inject the dynamic HTML we built above
                 h2.markdown(header_html, unsafe_allow_html=True)
                 
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
@@ -209,7 +221,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
                     active_24h = sys_tel[sys_tel['checkins_24h'] > 0]['NodeNum'].nunique()
                     
-                    # Calculate Data Age
                     latest_ts = sys_tel['latest_ts'].max()
                     if pd.notnull(latest_ts):
                         now_utc = pd.Timestamp.now(tz='UTC')
@@ -231,7 +242,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
                 
-                # Print the merged metrics block
                 st.markdown(
                     f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
                     f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
@@ -271,7 +281,6 @@ def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
         st.caption("No recent data")
         return
     
-    # Mathematical averages strictly use the dataframe passed in, zero cross-contamination
     latest_val = g_df['latest_temp'].mean()
     c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
     m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
@@ -284,7 +293,6 @@ def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
 
     st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
     
-    # Calculate % of nodes meeting target goal directly in Python
     if target_temp is not None:
         total_valid_nodes = g_df['NodeNum'].nunique()
         if total_valid_nodes > 0:
@@ -292,7 +300,6 @@ def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
             pct = (nodes_meeting_target / total_valid_nodes) * 100
             color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
             
-            # --- NEW: Convert target limit for display if in Celsius ---
             display_target = target_temp
             if unit_mode == "Celsius":
                 display_target = (target_temp - 32) * 5/9
