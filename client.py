@@ -792,12 +792,10 @@ def render_client_portal():
             full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
 
     # --- REGISTRY METADATA LOOKUP ---
-    # Isolate the root project row (e.g. "2527") 
     root_row = proj_registry[proj_registry['Project'].astype(str).str.strip() == root_job_id]
     if root_row.empty:
         root_row = proj_registry.iloc[[0]]
 
-    # Isolate the phase row (e.g. "2527-Phase 1")
     phase_row = root_row 
     if selected_phase:
         specific_row = proj_registry[proj_registry['Project'].str.contains(str(selected_phase), case=False, na=False)]
@@ -807,23 +805,18 @@ def render_client_portal():
     primary_meta = phase_row.iloc[0].to_dict()
     root_meta = root_row.iloc[0].to_dict()
     
-    # 1. EXTRACT ORIENTATION SAFELY (With fallback to the root project row!)
-    p_orientation = "vertical"
-    
-    # Check the specific phase row first
-    raw_val = primary_meta.get("Orientation") if pd.notnull(primary_meta.get("Orientation")) else primary_meta.get("orientation")
-    
-    # If the phase row is blank, fall back to checking the main root row
-    if pd.isnull(raw_val) or str(raw_val).strip() == "":
-        raw_val = root_meta.get("Orientation") if pd.notnull(root_meta.get("Orientation")) else root_meta.get("orientation")
+    # 1. BULLETPROOF EXTRACTOR: Ignores Pandas NaNs and Empty Strings
+    def get_orient(meta_dict):
+        val = meta_dict.get("Orientation", meta_dict.get("orientation"))
+        if pd.notnull(val) and str(val).strip().lower() not in ['nan', 'none', '']:
+            return str(val).strip().lower()
+        return None
         
-    if pd.notnull(raw_val) and str(raw_val).strip():
-        p_orientation = str(raw_val).strip().lower()
+    # Check phase row first, fall back to root row, default to vertical
+    p_orientation = get_orient(primary_meta) or get_orient(root_meta) or "vertical"
         
     raw_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
-    # Truncate "- Phase 2" or similar from the master project title so it is perfectly clean
     base_project_name = re.split(r'(?i)\s*-\s*Phase', raw_project_name)[0].strip()
-    
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     st.title(f"📊 {base_project_name}")
@@ -832,25 +825,20 @@ def render_client_portal():
     if pd.notnull(last_approved_local):
         st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
 
-    tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
-    
+    tabs = st.tabs(["🏠 Summary", "📈 Timeline Analysis", "📏 Distance Profile" if p_orientation == "horizontal" else "📏 Depth Profile", "📋 Summary Table", "🗺️ As Built"])
     
     with tabs[0]:
         render_summary_tab(master_df, "°F", local_tz, base_project_name, proj_registry)
 
     with tabs[1]:
+        # ... (Your Timeline analysis loop remains exactly as it was) ...
         ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
         ambient_df = full_p_df[ambient_mask].copy()
-        
         raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
         locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
         
         try:
-            map_query = f"""
-                SELECT Project, Location, Map_X, Map_Y, Image_Name 
-                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
-                WHERE CAST(Project AS STRING) = '{root_job_id}'
-            """
+            map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{root_job_id}'"
             df_all_locs = client.query(map_query).to_dataframe()
         except Exception as e:
             df_all_locs = pd.DataFrame()
@@ -859,10 +847,8 @@ def render_client_portal():
         for loc in locations:
             with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
                 loc_data = full_p_df[full_p_df['Location'] == loc].copy()
-                
                 matched_project_id = loc_data['Project'].iloc[0]
                 current_phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
-                
                 loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
                 
                 loc_f_start_date = None
@@ -879,11 +865,7 @@ def render_client_portal():
                         loc_start_view = project_start
                 
                 loc_upper = str(loc).upper().strip()
-                is_brine_pipe = (
-                    loc_upper.startswith('S') or 
-                    loc_upper.startswith('R') or 
-                    any(x in loc_upper for x in ['SUPPLY', 'RETURN', 'BRINE', 'BANK'])
-                )
+                is_brine_pipe = (loc_upper.startswith('S') or loc_upper.startswith('R') or any(x in loc_upper for x in ['SUPPLY', 'RETURN', 'BRINE', 'BANK']))
                 
                 graph_curve_id = None if is_brine_pipe else f"{matched_project_id}-{loc}"
                 target_ambient = ambient_df if is_brine_pipe else None
@@ -905,13 +887,9 @@ def render_client_portal():
                         st.plotly_chart(fig, use_container_width=True)
 
                     with col_map:
-                        site_map_fig = build_cropped_site_map(
-                            project_id=root_job_id, location_name=loc, df_map=df_all_locs, as_built_dir="as_builts"
-                        )
-                        if site_map_fig:
-                            st.plotly_chart(site_map_fig, use_container_width=True)
-                        else:
-                            st.info(f"🗺️ Map image for {root_job_id} not found in the as_builts folder.")
+                        site_map_fig = build_cropped_site_map(project_id=root_job_id, location_name=loc, df_map=df_all_locs, as_built_dir="as_builts")
+                        if site_map_fig: st.plotly_chart(site_map_fig, use_container_width=True)
+                        else: st.info(f"🗺️ Map image for {root_job_id} not found in the as_builts folder.")
                 else:
                     fig = build_high_speed_graph(
                         df=loc_data, title=f"{loc} History", start_view=loc_start_view, 
@@ -923,6 +901,7 @@ def render_client_portal():
                     st.plotly_chart(fig, use_container_width=True)
 
     with tabs[2]:
+        # TAB 3 NOW PROPERLY RECEIVES p_orientation
         render_depth_profile_tab(full_p_df, "°F", local_tz, orientation=p_orientation)
     
     with tabs[3]:
@@ -931,11 +910,9 @@ def render_client_portal():
         
     with tabs[4]:
         if show_as_built:
-            # 1. Dynamically refresh phase_meta for the selected phase
             current_asbuilt_meta = primary_meta
             if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
                 phase_num_clean = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
-                # Find the exact registry row corresponding to this phase
                 matching_reg_row = proj_registry[
                     proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(phase_num_clean)}$', na=False) |
                     proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(phase_num_clean)}\b', na=False)
@@ -947,19 +924,13 @@ def render_client_portal():
             
             if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
                 all_asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
-                
-                # 2. Strict filename filtering based on the naming convention (e.g., 2541-1-X.png vs 2541-2-X.png)
                 asbuilt_filenames = []
                 if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
                     phase_num = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
                     target_pattern = fr"{root_job_id}-{phase_num}-"
-                    
-                    # Strictly filter for files matching "JOB-PHASE-" pattern
                     asbuilt_filenames = [f for f in all_asbuilt_filenames if target_pattern in f]
                 
-                # Fallback to all files in asbuilt_raw if no strict phase pattern match was found
-                if not asbuilt_filenames:
-                    asbuilt_filenames = all_asbuilt_filenames
+                if not asbuilt_filenames: asbuilt_filenames = all_asbuilt_filenames
 
                 if not asbuilt_filenames:
                      st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
