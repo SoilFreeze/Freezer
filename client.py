@@ -831,15 +831,6 @@ def render_client_portal():
     local_tz = primary_meta.get('Timezone', 'US/Pacific')
     
     st.title(f"📊 {base_project_name}")
-
-    # --- 🛑 TEMPORARY DEBUG BLOCK (Delete once it's working) ---
-    st.warning(f"🔧 **DEBUG:** App believes this project is: **{p_orientation.upper()}**")
-    with st.expander("🔧 Click to see raw BigQuery Metadata"):
-        st.write("If you don't see 'orientation' in this list, BigQuery isn't sending it to client.py:")
-        st.json(primary_meta)
-    # -----------------------------------------------------------
-    
-    st.title(f"📊 {base_project_name}")
     
     last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
     if pd.notnull(last_approved_local):
