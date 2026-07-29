@@ -847,6 +847,10 @@ def render_client_portal():
 
     with tabs[2]:
         render_depth_profile_tab(full_p_df, "°F", local_tz, orientation=p_orientation)
+            p_orientation = "vertical"
+            raw_val = primary_meta.get("Orientation") or primary_meta.get("orientation")
+            if pd.notnull(raw_val):
+                p_orientation = raw_val
     
     with tabs[3]:
         st.subheader("📋 24-Hour Pipe Summary Table")
