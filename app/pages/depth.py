@@ -11,7 +11,9 @@ from app.pages.admin import natural_sort_key
 #########################
 # Page 3 - Depth Charts #
 #########################
-def render_depth_charts(selected_project, unit_label, display_tz):
+def render_depth_charts(selected_project, unit_label, display_tz, orientation="vertical"):
+    is_horizontal = str(orientation).strip().lower() == "horizontal"
+    chart_type_label = "Distance" if is_horizontal else "Depth"
     """
     Vertical Temperature Profiles.
     Maps arrays dynamically based on native view Depth allocations.
