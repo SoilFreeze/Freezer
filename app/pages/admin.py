@@ -1,4 +1,3 @@
-import streamlit as st
 import pandas as pd
 import time
 import re
@@ -6,10 +5,24 @@ import requests
 import numpy as np
 import os
 from PIL import Image
-from streamlit_image_coordinates import streamlit_image_coordinates
 from datetime import datetime, timedelta
 from google.cloud import bigquery
 
+# --- SAFE FRAMEWORK DETECTION ---
+try:
+    import streamlit as st
+    from streamlit_image_coordinates import streamlit_image_coordinates
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
+
+def safe_cache(ttl=600):
+    """Uses Streamlit cache if available, otherwise just runs the function."""
+    def decorator(func):
+        if HAS_STREAMLIT:
+            return st.cache_data(ttl=ttl)(func)
+        return func
+    return decorator
 
 # Internal Config & Data connections
 from app.utils.config import (
