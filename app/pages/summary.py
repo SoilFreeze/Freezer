@@ -10,12 +10,15 @@ from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER
 ##############################
 def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz):
     """
-    Renders Global Active Project Summary.
-    Always displays all projects, bypassing the specific sidebar project selection.
+    Renders Active Project Summary.
+    Now respects specific project selection if provided!
     """
     show_archived = st.session_state.get('global_show_archived', False)
     
-    if show_archived:
+    # 1. Update the header dynamically
+    if selected_project and selected_project != "All Projects":
+        st.header(f"📊 Project Summary: {selected_project}")
+    elif show_archived:
         st.header("🌐 Global Project Summary (Includes Archived)")
     else:
         st.header("🌐 Global Active Project Summary")
@@ -23,8 +26,14 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     client = get_bq_client()
     if client is None: return
 
-    # --- 1. THE CONTROL LIST: Dynamic based on Sidebar Toggle ---
+    # --- 1. THE CONTROL LIST: Dynamic based on Sidebar Toggle & Selected Project ---
     status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
+    
+    # 2. Inject the specific job number filter if one is selected
+    project_filter = ""
+    if selected_project and selected_project != "All Projects":
+        job_root = str(selected_project).split('-')[0].strip()
+        project_filter = f"AND CAST(Project AS STRING) LIKE '{job_root}%'"
 
     proj_q = f"""
         SELECT 
@@ -37,8 +46,10 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         FROM `{PROJECT_REGISTRY_TABLE}`
         WHERE UPPER(Project) NOT LIKE '%OFFICE%'
           {status_filter}
+          {project_filter}
         ORDER BY Project
     """
+    
     try: 
         active_projs = client.query(proj_q).to_dataframe()
     except Exception as e: 
@@ -46,6 +57,8 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
 
     if active_projs.empty:
         return st.info("No projects found in registry.")
+
+    # ... [The rest of your existing summary.py code remains exactly the same starting from "pool_q = ..."]
 
     # --- 2. INVENTORY POOL: Total assigned hardware ---
     pool_q = f"""
