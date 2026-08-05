@@ -194,7 +194,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             has_elevation_data = True
         else:
             if HAS_STREAMLIT:
-                st.warning(f"⚠️ No elevation data in database for {title}."))
+                st.warning(f"⚠️ No elevation data in database for {title}.")
 
     if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
         try:
