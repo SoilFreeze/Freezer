@@ -1,35 +1,30 @@
-import streamlit as st
 import pandas as pd
+
+# --- SAFE FRAMEWORK DETECTION ---
+try:
+    import streamlit as st
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
 
 # Internal Data & Config
 from app.data.processor import get_bq_client
 from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER_VIEW
 
-##############################
-# Page 1 - Dashboard Summary #
-##############################
-def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz):
+def get_summary_data(selected_project, show_archived_opt=None):
     """
-    Renders Active Project Summary.
-    Now respects specific project selection if provided!
+    Pure Python function to retrieve all summary data matrices.
+    Returns: (active_projs_df, pool_df, tel_df, error_msg)
     """
-    show_archived = st.session_state.get('global_show_archived', False)
-    
-    # 1. Update the header dynamically
-    if selected_project and selected_project != "All Projects":
-        st.header(f"📊 Project Summary: {selected_project}")
-    elif show_archived:
-        st.header("🌐 Global Project Summary (Includes Archived)")
-    else:
-        st.header("🌐 Global Active Project Summary")
-    
+    show_archived = show_archived_opt
+    if show_archived is None and HAS_STREAMLIT:
+        show_archived = st.session_state.get('global_show_archived', False)
+        
     client = get_bq_client()
-    if client is None: return
+    if client is None: return None, None, None, "Database connection unavailable."
 
-    # --- 1. THE CONTROL LIST: Dynamic based on Sidebar Toggle & Selected Project ---
     status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
     
-    # 2. Inject the specific job number filter if one is selected
     project_filter = ""
     if selected_project and selected_project != "All Projects":
         job_root = str(selected_project).split('-')[0].strip()
@@ -53,26 +48,21 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     try: 
         active_projs = client.query(proj_q).to_dataframe()
     except Exception as e: 
-        return st.error(f"Project Registry failed: {e}")
+        return None, None, None, f"Project Registry failed: {e}"
 
     if active_projs.empty:
-        return st.info("No projects found in registry.")
+        return pd.DataFrame(), None, None, "No projects found in registry."
 
-    # ... [The rest of your existing summary.py code remains exactly the same starting from "pool_q = ..."]
-
-    # --- 2. INVENTORY POOL: Total assigned hardware ---
     pool_q = f"""
         SELECT CAST(Project AS STRING) as Project, Phase, System, UPPER(CAST(Location AS STRING)) as Location, COUNT(DISTINCT NodeNum) as total_assigned
         FROM `{NODE_REGISTRY_TABLE}`
         WHERE UPPER(Project) NOT LIKE '%OFFICE%'
-          -- Ensure we only count the currently active hardware in the hole
           AND (End_Date IS NULL OR TRIM(CAST(End_Date AS STRING)) = '')
         GROUP BY 1, 2, 3, 4
     """
     pool_df = client.query(pool_q).to_dataframe()
     pool_df[['Phase', 'System', 'Location']] = pool_df[['Phase', 'System', 'Location']].fillna('')
 
-    # --- 3. TELEMETRY: Last 48 hours of data ---
     summary_q = f"""
         WITH raw_data AS (
             SELECT Project, Phase, System, Bank, Location, Depth, temperature, timestamp, NodeNum
@@ -102,7 +92,39 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     if not tel_df.empty:
         tel_df[['Phase', 'System', 'Bank', 'Location']] = tel_df[['Phase', 'System', 'Bank', 'Location']].fillna('')
 
-    # --- 4. RENDER ENGINE: Iterate over the exact control list ---
+    return active_projs, pool_df, tel_df, None
+
+##############################
+# Page 1 - Dashboard Summary #
+##############################
+def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz):
+    """
+    Renders Active Project Summary.
+    Safely bypasses Streamlit UI rendering if executed within Shiny.
+    """
+    if not HAS_STREAMLIT:
+        return
+        
+    show_archived = st.session_state.get('global_show_archived', False)
+    
+    if selected_project and selected_project != "All Projects":
+        st.header(f"📊 Project Summary: {selected_project}")
+    elif show_archived:
+        st.header("🌐 Global Project Summary (Includes Archived)")
+    else:
+        st.header("🌐 Global Active Project Summary")
+        
+    # --- Execute Pure Python DB Extraction ---
+    active_projs, pool_df, tel_df, err = get_summary_data(selected_project, show_archived)
+    
+    if err:
+        if active_projs is not None and active_projs.empty:
+            st.info(err)
+        else:
+            st.error(err)
+        return
+        
+    # --- RENDER ENGINE ---
     for _, row in active_projs.iterrows():
         p_project = str(row['Project']).strip()
         p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
@@ -112,9 +134,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         if not p_status or p_status.lower() in ['nan', 'none']:
             p_status = "Archived"
             
-        # ====================================================================
-        # DATE CALCULATION LOGIC 
-        # ====================================================================
         f_date = row.get('Date_Freezedown')
         m_date = row.get('Date_Maintenance') 
 
@@ -129,13 +148,11 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
         if is_valid_date(f_date):
             f_date_dt = pd.to_datetime(f_date).date()
             f_date_display = f_date_dt.strftime('%b %d, %Y')
-            
             total_freezedown_days = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
             
             if is_valid_date(m_date):
                 m_date_dt = pd.to_datetime(m_date).date()
                 m_date_display = m_date_dt.strftime('%b %d, %Y')
-                
                 time_to_freeze = (m_date_dt - f_date_dt).days
                 maintenance_days = (pd.Timestamp.now(tz=display_tz).date() - m_date_dt).days
                 
@@ -158,22 +175,15 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     </div>
                 """
 
-        # ====================================================================
-        # ARCHIVED PROJECT SHORT-CIRCUIT
-        # ====================================================================
         if not is_active:
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
                 h1.subheader(f"📦 {p_name}")
                 h1.markdown(f"**Project Status:** `{p_status}`")
                 h2.markdown(header_html, unsafe_allow_html=True)
-            continue # Skip all telemetry math
+            continue
             
-        # ====================================================================
-        # ACTIVE PROJECT TELEMETRY MATH
-        # ====================================================================
         job_num = p_project.split('-')[0].strip()
-        
         target_phase = ""
         if "Phase 1" in p_project or "Phase1" in p_project: target_phase = "1"
         elif "Phase 2" in p_project or "Phase2" in p_project: target_phase = "2"
@@ -208,7 +218,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             if not tel_matches.empty:
                 is_sys = tel_matches['System'] == sys
                 is_amb = tel_matches['Location'].astype(str).str.upper() == 'AMBIENT'
-                
                 if sys == "": 
                     sys_tel = tel_matches
                 else:
@@ -224,16 +233,12 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             if sys: title_ext.append(f"System {sys}")
             title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
 
-            # Render the standard Active Project Card
             with st.container(border=True):
                 h1, h2 = st.columns([2, 1])
                 h1.subheader(f"🏗️ {p_name}{title_suffix}")
-                
                 h2.markdown(header_html, unsafe_allow_html=True)
-                
                 st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
                 
-                # --- HARDWARE & DATA AGE LOGIC ---
                 if not sys_tel.empty:
                     active_1h = sys_tel[sys_tel['checkins_1h'] > 0]['NodeNum'].nunique()
                     active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
@@ -293,7 +298,6 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                         render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label)
 
 def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
-    """Helper layout compiler to handle repeating column metric sets cleanly."""
     st.markdown(f"**{title}**")
     if g_df.empty or g_df['latest_temp'].isnull().all():
         st.caption("No recent data")
@@ -339,7 +343,6 @@ def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
     st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
 
 def get_trend_arrow(current, previous):
-    """Helper to generate trend icons with updated blue downward arrow."""
     if pd.isnull(current) or pd.isnull(previous): return "N/A"
     delta = current - previous
     if delta > 0.1: return f"🔺 +{delta:.1f}"
