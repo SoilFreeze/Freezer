@@ -1,17 +1,30 @@
-import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import re
 import app.utils.config as cfg
 from app.data.processor import get_bq_client 
-import plotly.graph_objects as go
 from PIL import Image
 import os
+
+# --- SAFE FRAMEWORK DETECTION ---
+try:
+    import streamlit as st
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
+
+def safe_cache(ttl=600):
+    """Uses Streamlit cache if available, otherwise just runs the function."""
+    def decorator(func):
+        if HAS_STREAMLIT:
+            return st.cache_data(ttl=ttl, show_spinner=False)(func)
+        return func
+    return decorator
 
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
 
-@st.cache_data(ttl=600, show_spinner=False)
+@safe_cache(ttl=600)
 def get_cached_reference_curve(curve_id, loc_digit):
     """Fetches reference curves once and caches them for all charts."""
     client = get_bq_client()
@@ -32,7 +45,7 @@ def get_cached_reference_curve(curve_id, loc_digit):
     except:
         return pd.DataFrame()
 
-@st.cache_data(ttl=600, show_spinner=False)
+@safe_cache(ttl=600)
 def get_cached_ambient_data(job_num, start_str):
     """Fetches ambient data once and caches it for all charts."""
     client = get_bq_client()
@@ -126,11 +139,29 @@ def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_b
     return fig
     
 def build_high_speed_graph(client, df, title, start_view, end_view, active_refs, unit_mode, unit_label, 
-                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, show_elevation=False):
+                           display_tz="UTC", mobile_mode=False, f_start_date=None, curve_id=None, show_elevation=False,
+                           # --- NEW OPTIONAL ARGUMENTS FOR SHINY ---
+                           opt_show_ref=None, opt_show_masked=None, opt_show_baddata=None, opt_show_ambient=None, opt_project_name=None):
     """
     Engineering-grade Trend Graph.
     """
     import plotly.graph_objects as go
+    
+    # --- STATE RESOLUTION RESOLVER ---
+    # Uses explicitly passed Shiny arguments first. If None, falls back to Streamlit session_state.
+    def get_ui_state(var_name, opt_val, default):
+        if opt_val is not None:
+            return opt_val
+        if HAS_STREAMLIT:
+            return st.session_state.get(var_name, default)
+        return default
+
+    # Resolve all visual toggles cleanly here:
+    _show_ref = get_ui_state('global_show_ref', opt_show_ref, True)
+    _show_masked = get_ui_state('global_show_masked', opt_show_masked, False)
+    _show_baddata = get_ui_state('global_show_baddata', opt_show_baddata, False)
+    _show_ambient = get_ui_state('global_show_ambient', opt_show_ambient, True)
+    _project_name = get_ui_state('selected_project', opt_project_name, '')
     
     clean_title_lower = str(title).lower().replace("thermal trends:", "").strip()
     
@@ -162,7 +193,8 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         if 'BaseElevation' in plot_df.columns and not plot_df['BaseElevation'].isnull().all():
             has_elevation_data = True
         else:
-            st.warning(f"⚠️ No elevation data in database for {title}.")
+            if HAS_STREAMLIT:
+                st.warning(f"⚠️ No elevation data in database for {title}."))
 
     if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
         try:
