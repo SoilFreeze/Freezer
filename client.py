@@ -52,29 +52,7 @@ app_ui = ui.page_navbar(
 # ===============================================================
 def server(input, output, session):
     
-    # 1. Reactive check to ensure a job number is active
-    @reactive.Calc
-    def current_job():
-        return input.job_number()
-
-    # 2. Render the summary cards dynamically when the job changes
-    @render.ui
-    def dynamic_summary_cards():
-        job = current_job()
-        if not job:
-            return ui.p("Please enter a job number in the sidebar.")
-            
-        from app.pages.summary import get_summary_data
-        active_projs, pool_df, tel_df, err = get_summary_data(selected_project=job, show_archived_opt=False)
-        
-        if err:
-            return ui.p(f"Database Error: {err}")
-            
-        if tel_df is None or tel_df.empty:
-            return ui.p(f"No recent telemetry data found for job: {job}")
-            
-        return ui.p(f"Successfully loaded data for project: {job}!")
-    
+       
     # @reactive.calc is Shiny's version of caching. 
     # It only fetches from BigQuery when the job_number actually changes!
     @reactive.calc
