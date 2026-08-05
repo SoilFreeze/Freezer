@@ -12,15 +12,16 @@ from app.components.charts import build_high_speed_graph
 # ===============================================================
 app_ui = ui.page_navbar(
     
-    # --- POSITIONAL ARGUMENTS MUST COME FIRST ---
     # TAB 1: Summary 
-    ui.nav_panel("🏠 Summary", 
+    ui.nav_panel(
+        "🏠 Summary", 
         ui.h2("Project Summary"),
         ui.output_ui("summary_cards") 
     ),
     
     # TAB 2: Timeline 
-    ui.nav_panel("📈 Timeline Analysis", 
+    ui.nav_panel(
+        "📈 Timeline Analysis", 
         ui.layout_sidebar(
             ui.sidebar(
                 ui.input_text("job_number", "Job Number (e.g., 2527):", value="2527"),
@@ -32,21 +33,15 @@ app_ui = ui.page_navbar(
     ),
     
     # TAB 3: As-Builts 
-    ui.nav_panel("🗺️ As Built", 
+    ui.nav_panel(
+        "🗺️ As Built", 
         ui.h2("Site As-Builts"),
         ui.output_ui("as_built_images")
     ),
     
-    # --- KEYWORD ARGUMENTS MUST GO AT THE END ---
+    # KEYWORD ARGUMENTS
     title="SoilFreeze Client Portal",
     id="main_nav"
-)
-    
-    # --- TAB 3: As-Builts ---
-    ui.nav_panel("🗺️ As Built", 
-        ui.h2("Site As-Builts"),
-        ui.output_ui("as_built_images")
-    )
 )
 
 # ===============================================================
