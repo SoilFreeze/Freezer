@@ -1,17 +1,17 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import re
 import os
-from google.cloud import bigquery
-from google.oauth2 import service_account
-from datetime import datetime, timedelta
-from PIL import Image
+
+# Import from your existing modular architecture
+from app.data.processor import get_universal_portal_data, get_bq_client
+from app.components.charts import build_high_speed_graph, build_cropped_site_map
+from app.pages.summary import render_summary_dashboard
+from app.pages.depth import render_depth_charts
 
 # ===============================================================
-# 1. DYNAMIC TARGET CONFIGURATION
+# 1. AUTHENTICATION & UI LOCKDOWN
 # ===============================================================
-
+# Try to get the job from secrets (for single-client deployments) or query params
 TARGET_JOB_NUMBER = None
 if "JOB_NUMBER" in st.secrets:
     TARGET_JOB_NUMBER = str(st.secrets["JOB_NUMBER"])
@@ -23,6 +23,7 @@ else:
 page_title = f"SoilFreeze Portal #{TARGET_JOB_NUMBER}" if TARGET_JOB_NUMBER else "SoilFreeze Client Portal"
 st.set_page_config(page_title=page_title, layout="wide")
 
+# Completely hide the internal sidebar navigation for clients
 st.markdown("""
     <style> 
         [data-testid="stSidebarNav"] {display: none;} 
@@ -35,7 +36,6 @@ if not TARGET_JOB_NUMBER:
     st.info("Please enter your assigned Job Number to view project telemetry.")
     
     manual_job = st.text_input("Job Number:", placeholder="e.g., 2527")
-    
     if not manual_job:
         st.stop()
         
@@ -43,950 +43,142 @@ if not TARGET_JOB_NUMBER:
     st.rerun()
 
 # ===============================================================
-PROJECT_ID = "sensorpush-export"
-DATASET_ID = "Temperature" 
+# 2. CLIENT DEFAULTS (Injecting required session states)
+# ===============================================================
+# Your internal modules rely on these session states. We hardcode them for the client view.
+st.session_state['selected_project'] = TARGET_JOB_NUMBER
+st.session_state['global_show_archived'] = False
+st.session_state['global_show_ambient'] = True
+st.session_state['global_show_elevation'] = False
+st.session_state['global_show_map'] = True
+st.session_state['global_show_baddata'] = False
+st.session_state['global_show_masked'] = False
+st.session_state['global_show_ref'] = True
+st.session_state['global_lookback_days'] = 42 # Default 6 weeks for client view
 
-PROJECT_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.project_registry"
-NODE_REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.node_registry_synced"
+unit_mode = "Fahrenheit"
+unit_label = "°F"
+st.session_state["unit_mode"] = unit_mode
+st.session_state["unit_label"] = unit_label
 
-# --- CORE UTILITIES ---
-@st.cache_resource
-def get_bq_client():
-    try:
-        if "gcp_service_account" in st.secrets:
-            info = st.secrets["gcp_service_account"]
-            SCOPES = ["https://www.googleapis.com/auth/bigquery", "https://www.googleapis.com/auth/drive.readonly"]
-            credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-            return bigquery.Client(credentials=credentials, project=info["project_id"])
-        return bigquery.Client(project=PROJECT_ID)
-    except Exception as e:
-        st.error(f"❌ Authentication Failed: {e}")
-        return None
+# You can fetch this dynamically from project registry, or default it
+display_tz = "US/Pacific" 
+st.session_state["display_tz"] = display_tz
+active_refs = [(32.0, "Freezing")]
 
-def ensure_tz_convert(series, target_tz):
-    if series.dt.tz is None:
-        return series.dt.tz_localize('UTC').dt.tz_convert(target_tz)
-    return series.dt.tz_convert(target_tz)
-
-def natural_sort_key(s):
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
-
-@st.cache_data(ttl=600)
-def get_universal_portal_data(target_job_number):
-    client = get_bq_client()
-    if client is None: return pd.DataFrame()
+# ===============================================================
+# 3. INTERACTIVE FRAGMENT (The Speed Fix)
+# ===============================================================
+# Wrapping this in @st.fragment means interacting with dropdowns will NOT rerun the whole script.
+@st.fragment
+def render_interactive_timeline(df, job_num, bq_client):
+    st.write("### 📈 Timeline Analysis")
     
-    root_job_id = str(target_job_number).split('-')[0].strip()
+    available_phases = sorted([str(p) for p in df['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']])
+    available_systems = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']])
     
-    query = f"""
-        SELECT 
-            Project, Phase, System, NodeNum, Bank, Location, Depth, temperature, timestamp, approval_status, SensorStatus
-        FROM `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2`
-        WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
-          AND UPPER(TRIM(CAST(approval_status AS STRING))) = 'TRUE'
-          AND UPPER(TRIM(CAST(SensorStatus AS STRING))) IN ('ON PROJECT', 'AVAILABLE', 'MISSING')
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%OFFICE%'
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%DESK%'
-          AND UPPER(TRIM(CAST(Location AS STRING))) NOT LIKE '%TEST%'
-          AND UPPER(TRIM(CAST(Project AS STRING))) NOT LIKE '%OFFICE%'
-          AND temperature >= -30.0 AND temperature <= 120.0
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("root_job_id", "STRING", root_job_id)]
-    )
-    df = client.query(query, job_config=job_config).to_dataframe()
+    col1, col2 = st.columns(2)
+    selected_phase = None
+    selected_systems = []
     
-    if df.empty: return pd.DataFrame()
-    
-    reg_q = f"""
-        SELECT Project, NodeNum, Location, Start_Date, End_Date 
-        FROM `{NODE_REGISTRY_TABLE}` 
-        WHERE TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) = @root_job_id
-    """
-    reg_df = client.query(reg_q, job_config=job_config).to_dataframe()
-    
-    if not reg_df.empty:
-        df['Project'] = df['Project'].astype(str).str.strip()
-        reg_df['Project'] = reg_df['Project'].astype(str).str.strip()
-        
-        reg_df['Start_Date'] = pd.to_datetime(reg_df['Start_Date'], errors='coerce', utc=True)
-        reg_df['End_Date'] = pd.to_datetime(reg_df['End_Date'], errors='coerce', utc=True)
-        
-        df = df.merge(reg_df[['Project', 'NodeNum', 'Location', 'Start_Date', 'End_Date']], 
-                      on=['Project', 'NodeNum', 'Location'], 
-                      how='left')
-        
-        df = df[df['Start_Date'].isna() | (df['timestamp'] >= df['Start_Date'])]
-        df = df[df['End_Date'].isna() | (df['timestamp'] <= df['End_Date'])]
-    
-    df = df.sort_values(by=['NodeNum', 'Location', 'Depth', 'Bank', 'timestamp'])
-    df['prev_timestamp'] = df.groupby(['NodeNum', 'Location', 'Depth', 'Bank'])['timestamp'].shift(1)
-    df = df[df['prev_timestamp'].isna() | ((df['timestamp'] - df['prev_timestamp']).dt.total_seconds() / 3600 <= 24)]
-    
-    return df.sort_values('timestamp')
-
-# --- MAP FUNCTION ---
-def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts"):
-    if df_map is None or df_map.empty or 'Project' not in df_map.columns:
-        return None
-        
-    pipe_data = df_map[(df_map['Project'].astype(str) == str(project_id)) & (df_map['Location'] == location_name)]
-    
-    if pipe_data.empty:
-        return None
-        
-    pipe_x = float(pipe_data.iloc[0]['Map_X'])
-    pipe_y = float(pipe_data.iloc[0]['Map_Y'])
-
-    if not os.path.exists(as_built_dir):
-        return None
-
-    target_filename = None
-    if 'Image_Name' in pipe_data.columns and pd.notnull(pipe_data.iloc[0]['Image_Name']):
-        target_filename = str(pipe_data.iloc[0]['Image_Name']).strip()
-
-    if target_filename:
-        img_path = os.path.join(as_built_dir, target_filename)
-        if not os.path.exists(img_path):
-            return None 
-    else:
-        available_files = [f for f in os.listdir(as_built_dir) if f.startswith(str(project_id)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        if not available_files:
-            return None
-        img_path = os.path.join(as_built_dir, available_files[0])
-        
-    img = Image.open(img_path)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=[pipe_x], 
-        y=[pipe_y],
-        mode='markers', 
-        name=location_name,
-        marker=dict(size=27, color='rgba(0,0,0,0)', line=dict(width=2, color='red')),
-        hoverinfo='none'
-    ))
-
-    fig.update_layout(
-        images=[dict(
-            source=img, xref="x", yref="y", x=0, y=0,  
-            sizex=img.width, sizey=img.height, sizing="stretch",
-            opacity=0.9, layer="below"
-        )],
-        xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_x - 300, pipe_x + 300]),
-        yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[pipe_y + 300, pipe_y - 300]), 
-        margin=dict(l=0, r=0, t=0, b=0), 
-        showlegend=False, height=400 
-    )
-    return fig
-
-# --- THE ENGINEERING GRAPHING ENGINE ---
-def build_high_speed_graph(df, title, start_view, end_view, unit_mode, unit_label, 
-                           display_tz="UTC", f_start_date=None, curve_id=None, ambient_df=None, target_phase=None,
-                           show_theoretical=True, show_ambient=True, show_elevation=False):
-    if df.empty: return go.Figure().update_layout(title="No data available")
-
-    client = get_bq_client()
-    plot_df = df.copy() 
-    fig = go.Figure()
-
-    plot_df['timestamp'] = ensure_tz_convert(plot_df['timestamp'], display_tz)
-    
-    freeze_pt = 0 if unit_mode == "Celsius" else 32
-    y_range = [-30, 30] if unit_mode == "Celsius" else [-20, 80]
-
-    final_end_view, final_start_view = end_view, start_view
-    loc_part = str(curve_id).split('-')[-1] if curve_id else ""
-
-    if show_theoretical and curve_id and f_start_date:
-        try:
-            dash_styles = ['dash', 'dashdot', 'dot', 'longdash', 'longdashdot']
-            digits = re.findall(r'\d+', loc_part)
-            loc_digit = digits[0] if digits else loc_part
-            target_phase_str = target_phase if target_phase else TARGET_JOB_NUMBER
+    with col1:
+        if len(available_phases) > 1:
+            selected_phase = st.selectbox("📂 Select Project Phase:", ["All Phases"] + available_phases)
+    with col2:
+        if len(available_systems) > 1:
+            selected_systems = st.multiselect("⚙️ Filter by System:", options=available_systems, default=[])
             
-            target_q = f"""
-                SELECT CurveID, Day, Temp 
-                FROM `{PROJECT_ID}.{DATASET_ID}.reference_curves` 
-                WHERE UPPER(CurveID) LIKE UPPER('%{target_phase_str}%') 
-                AND REGEXP_CONTAINS(UPPER(CurveID), r'(?i)T[P]?0?{loc_digit}([^0-9]|$)')
-                AND NOT REGEXP_CONTAINS(UPPER(CurveID), r'(?i)BRINE')
-                ORDER BY Day
-            """
-            target_df = client.query(target_q).to_dataframe()
-            
-            if not target_df.empty:
-                for idx, (cid, c_df) in enumerate(target_df.groupby('CurveID')):
-                    c_df['timestamp'] = c_df['Day'].apply(lambda d: pd.Timestamp(f_start_date) + pd.Timedelta(days=d))
-                    c_df['timestamp'] = ensure_tz_convert(c_df['timestamp'], display_tz)
-                    ref_y = c_df['Temp'] if unit_mode == "Fahrenheit" else (c_df['Temp'] - 32) * 5/9
-                    soil_label = str(cid).split('-')[-1].strip()
-                    
-                    fig.add_trace(go.Scatter(
-                        x=c_df['timestamp'], y=ref_y, name=f"<b>Goal: {soil_label}</b>", mode='lines',
-                        line=dict(color='rgba(80, 80, 80, 0.9)', width=4, dash=dash_styles[idx % len(dash_styles)], shape='spline', smoothing=1.3),
-                        legendrank=1 
-                    ))
-        except: pass
-            
-    sf_15_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#FF1493', '#00CED1', '#FFD700', '#8A2BE2', '#32CD32']
-    
-    def get_position_string(row):
-        depth_val, bank_val, loc_val = row['Depth'], row['Bank'], row['Location']
-        if pd.notnull(bank_val) and any(x in str(bank_val).upper() for x in ['S', 'R']):
-            return str(bank_val)
-        elif pd.notnull(depth_val) and str(depth_val).strip() != '' and float(depth_val) != 0: 
-            return f"{depth_val}ft"
-        else: 
-            return str(loc_val)
-
-    plot_df['PositionLabel'] = plot_df.apply(get_position_string, axis=1)
-    plot_df = plot_df[
-        (~plot_df['PositionLabel'].str.upper().str.contains('OFFICE')) &
-        (~plot_df['PositionLabel'].str.upper().str.contains('DESK')) &
-        (~plot_df['PositionLabel'].str.upper().str.contains('TEST'))
-    ]
-
-    unique_positions = sorted(plot_df['PositionLabel'].unique(), key=natural_sort_key)
-    position_color_map = {pos: sf_15_palette[idx % len(sf_15_palette)] for idx, pos in enumerate(unique_positions)}
-
-    def get_legend_sort_key(pos_str, df):
-        sub_df = df[df['PositionLabel'] == pos_str]
-        if sub_df.empty: return (3, 0, pos_str)
-        row = sub_df.iloc[0]
-        bank = str(row['Bank']).upper() if pd.notnull(row['Bank']) else ""
-        depth = pd.to_numeric(row['Depth'], errors='coerce') if pd.notnull(row['Depth']) else 999
-        if 'R' in bank: return (0, bank, pos_str) 
-        if 'S' in bank: return (1, bank, pos_str)
-        return (2, depth, pos_str)
-
-    sorted_positions = sorted(unique_positions, key=lambda x: get_legend_sort_key(x, plot_df))
-
-    for pos in sorted_positions:
-        pos_df = plot_df[plot_df['PositionLabel'] == pos].sort_values('timestamp')
-        if pos_df.empty: continue
+    # Apply Filters seamlessly
+    filtered_df = df.copy()
+    if selected_phase and selected_phase != "All Phases":
+        filtered_df = filtered_df[filtered_df['Phase'].astype(str) == str(selected_phase)]
+    if selected_systems:
+        filtered_df = filtered_df[filtered_df['System'].astype(str).isin(selected_systems)]
         
-        for node_id in pos_df['NodeNum'].unique():
-            node_pos_df = pos_df[pos_df['NodeNum'] == node_id].copy()
-            node_pos_df = node_pos_df.sort_values('timestamp').reset_index(drop=True)
-            time_deltas = node_pos_df['timestamp'].diff()
-            gap_indices = time_deltas[time_deltas > timedelta(hours=24)].index
-            
-            if not gap_indices.empty:
-                inserted_gaps = []
-                for idx in gap_indices:
-                    gap_row = node_pos_df.loc[idx].copy()
-                    prev_ts = node_pos_df.loc[idx - 1]['timestamp']
-                    gap_row['timestamp'] = prev_ts + timedelta(seconds=1)
-                    gap_row['temperature'] = None 
-                    inserted_gaps.append(gap_row)
-                
-                node_pos_df = pd.concat([node_pos_df, pd.DataFrame(inserted_gaps)]).sort_values('timestamp').reset_index(drop=True)
-            
-            loc_val = node_pos_df['Location'].iloc[0] if 'Location' in node_pos_df.columns else ""
-            display_name = f"{loc_val} - {pos} (Node: {node_id})"
-            
-            fig.add_trace(go.Scatter(
-                x=node_pos_df['timestamp'], y=node_pos_df['temperature'], 
-                name=display_name, mode='lines', connectgaps=False, 
-                line=dict(shape='spline', smoothing=1.3, width=2, color=position_color_map[pos]),
-                showlegend=True,
-                hovertemplate=f"<b>{pos}</b> (Node: %{{text}})<br>Temp: %{{y:.1f}}{unit_label}<extra></extra>",
-                text=node_pos_df['NodeNum']
-            ))
-
-    if show_ambient and ambient_df is not None and not ambient_df.empty:
-        amb_plot_df = ambient_df.copy()
-        amb_plot_df['timestamp'] = ensure_tz_convert(amb_plot_df['timestamp'], display_tz)
-        
-        for sn in amb_plot_df['NodeNum'].unique():
-            a_df = amb_plot_df[amb_plot_df['NodeNum'] == sn].sort_values('timestamp')
-            a_df = a_df[(a_df['timestamp'] >= final_start_view) & (a_df['timestamp'] <= final_end_view)]
-            
-            if not a_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=a_df['timestamp'], y=a_df['temperature'],
-                    name=f"Ambient Air ({sn})", mode='lines',
-                    connectgaps=False,
-                    line=dict(width=2.5, dash='dot', color='orange'),
-                    hovertemplate="<b>Ambient Air</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
-                    legendrank=99 
-                ))
-            
-    fig.add_hline(y=freeze_pt, line_width=2, line_dash="dash", line_color="RoyalBlue", annotation_text="32°F FREEZE", layer="above")
-    now_ts = pd.Timestamp.now(tz=display_tz)
-    fig.add_vline(x=now_ts.to_pydatetime(), line_width=2, line_color="red", line_dash="dash", layer='above')
-    
-    m_range = pd.date_range(start=final_start_view, end=final_end_view, freq='W-MON')
-    for m_dt in m_range:
-        fig.add_vline(x=m_dt, line_width=1.5, line_color="black", opacity=0.4)
-
-    fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", x=0.02, y=0.98, font=dict(size=18)),
-        plot_bgcolor='white', hovermode="x unified", height=650,
-        xaxis=dict(
-            range=[final_start_view, final_end_view], showgrid=True, gridcolor='Gainsboro',
-            showline=True, mirror=True, linecolor='black', linewidth=2,
-            minor=dict(dtick=1000*60*60*24, showgrid=True, gridcolor='#f8f8f8'), tickformat='%b %d'
-        ),
-        yaxis=dict(
-            title=f"Temperature ({unit_label})", range=y_range, dtick=10,
-            minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-            showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2
-        ),
-        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top")
-    )
-    return fig
-
-def render_summary_tab(master_df, unit_label, local_tz, base_project_name, proj_registry):
-    df_local = master_df.copy()
-    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
-    
-    def classify_pipe(row):
-        loc = str(row.get('Location', '')).upper()
-        bank = str(row.get('Bank', '')).upper()
-        
-        if any(x in loc or x in bank for x in ['AMBIENT', 'AMB', 'AIR', 'OUTSIDE', 'WEATHER']): 
-            return 'Ambient'
-        if 'S' in bank or 'SUPPLY' in loc: return 'Supply (S)'
-        if 'R' in bank or 'RETURN' in loc: return 'Return (R)'
-        return 'Temp Pipes (TP)'
-
-    df_local['PipeType'] = df_local.apply(classify_pipe, axis=1)
-    
-    if 'Phase' not in df_local.columns:
-        df_local['Phase'] = 'Default'
-    df_local['Phase'] = df_local['Phase'].fillna('Unassigned Phase').replace(['', 'NAN', 'NONE'], 'Unassigned Phase')
-    
-    if 'System' not in df_local.columns:
-        df_local['System'] = 'Default'
-    df_local['System'] = df_local['System'].fillna('Unassigned System').replace(['', 'NAN', 'NONE'], 'Unassigned System')
-    
-    ambient_global = df_local[df_local['PipeType'] == 'Ambient'].copy()
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-    
-    phases = sorted(df_local['Phase'].unique(), key=natural_sort_key)
-    
-    for phase in phases:
-        phase_df = df_local[df_local['Phase'] == phase]
-        
-        if phase_df['PipeType'].nunique() == 1 and phase_df['PipeType'].iloc[0] == 'Ambient':
-            continue
-            
-        phase_str = str(phase).strip()
-        
-        # --- STRICT REGEX PER-PHASE DATE MATCHING ---
-        # Extract just the pure phase number (e.g., "Phase 1" becomes "1")
-        core_phase = re.sub(r'(?i)PHASE\s*', '', phase_str).strip()
-        
-        # 1. Search the ProjectName for exactly "Phase X" (prevents "1" from matching "160")
-        name_match = proj_registry[proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(core_phase)}\b', na=False)]
-        
-        if not name_match.empty:
-            phase_meta = name_match.iloc[0].to_dict()
-        else:
-            # 2. Fallback: check if the Project ID ends in "-X" or "-PhaseX"
-            id_match = proj_registry[proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(core_phase)}$', na=False)]
-            if not id_match.empty:
-                phase_meta = id_match.iloc[0].to_dict()
-            else:
-                # 3. Ultimate fallback to the root row if no specific phase row exists
-                phase_meta = proj_registry.iloc[[0]].iloc[0].to_dict()
-            
-        f_start_date = None
-        day_count_text = ""
-        start_date_text = ""
-        if pd.notnull(phase_meta.get('Date_Freezedown')):
-            f_start_date = pd.to_datetime(phase_meta.get('Date_Freezedown')).date()
-            days_since = (now_local.date() - f_start_date).days
-            day_count_text = f"🗓️ **Day {max(0, days_since)}** of Freezedown" if days_since >= 0 else f"⏳ **{abs(days_since)} Days** until Start"
-            start_date_text = f"**Freeze Start Date:** {f_start_date.strftime('%B %d, %Y')}"
-
-        # --- DYNAMIC PHASE TITLES ---
-        if phase_str == 'Default' or phase_str == 'Unassigned Phase':
-            header_title = base_project_name
-        else:
-            if "PHASE" not in phase_str.upper():
-                header_title = f"{base_project_name} - Phase {phase_str}"
-            else:
-                header_title = f"{base_project_name} - {phase_str}"
-            
-        st.markdown(f"### 📊 {header_title}")
-        
-        date_c1, date_c2 = st.columns(2)
-        with date_c1:
-            if day_count_text: st.markdown(day_count_text)
-        with date_c2:
-            if start_date_text: st.markdown(start_date_text)
-            
-        st.markdown("<hr style='margin-top: 5px; margin-bottom: 15px;'>", unsafe_allow_html=True)
-        
-        systems = sorted(phase_df['System'].unique(), key=natural_sort_key)
-        
-        for system in systems:
-            if system == 'Unassigned System' and len(systems) > 1:
-                sys_check = phase_df[phase_df['System'] == system]
-                if sys_check['PipeType'].nunique() == 1 and sys_check['PipeType'].iloc[0] == 'Ambient':
-                    continue 
-            
-            system_str = str(system).strip()
-            if system_str.upper() != 'DEFAULT' and system_str.upper() != 'UNASSIGNED SYSTEM':
-                # --- DYNAMIC SYSTEM PREFIX ---
-                display_sys = f"System {system_str}" if not system_str.upper().startswith("SYSTEM") else system_str
-                st.markdown(f"##### ⚙️ {display_sys}")
-            
-            sys_df = phase_df[phase_df['System'] == system]
-            
-            if not ambient_global.empty and 'Ambient' not in sys_df['PipeType'].values:
-                sys_df = pd.concat([sys_df, ambient_global], ignore_index=True)
-                
-            hist_window = sys_df[sys_df['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-            latest_snapshot = sys_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-
-            cols = st.columns(4)
-            categories = ['Supply (S)', 'Return (R)', 'Temp Pipes (TP)', 'Ambient']
-
-            for i, p_type in enumerate(categories):
-                with cols[i]:
-                    snap_type_df = latest_snapshot[latest_snapshot['PipeType'] == p_type]
-                    hist_type_df = hist_window[hist_window['PipeType'] == p_type]
-                    
-                    if snap_type_df.empty:
-                        st.markdown(f"**{p_type}**<br><span style='color:gray; font-size: 14px;'>No data available.</span>", unsafe_allow_html=True)
-                        continue
-
-                    avg_val = snap_type_df['temperature'].mean()
-                    
-                    if not hist_type_df.empty:
-                        high_val = hist_type_df['temperature'].max()
-                        low_val = hist_type_df['temperature'].min()
-                    else:
-                        high_val = snap_type_df['temperature'].max()
-                        low_val = snap_type_df['temperature'].min()
-
-                    st.markdown(f"""
-                    <div style="background-color: #f8f9fa; padding: 12px; border-radius: 8px; border: 1px solid #e9ecef;">
-                        <div style="font-weight: bold; margin-bottom: 8px; font-size: 16px;">{p_type}</div>
-                        <div style="font-size: 24px; font-weight: bold; color: #1f77b4; margin-bottom: 8px;">{avg_val:.1f}{unit_label} <span style="font-size: 12px; font-weight: normal; color: #6c757d;">AVG</span></div>
-                        <div style="font-size: 14px; color: #495057; display: flex; justify-content: space-between;">
-                            <span>🔺 <b>H:</b> {high_val:.1f}{unit_label}</span>
-                            <span>🔻 <b>L:</b> {low_val:.1f}{unit_label}</span>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-            st.markdown("<br>", unsafe_allow_html=True)
-        st.divider()
-
-def render_pipe_summary_table(full_p_df, unit_label, local_tz):
-    df_local = full_p_df.copy()
-    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
-    
-    now_local = pd.Timestamp.now(tz='UTC').tz_convert(local_tz)
-    df_24h = df_local[df_local['timestamp'] >= (now_local - pd.Timedelta(days=1))]
-    
-    if df_24h.empty:
-        st.info("No approved data available in the last 24 hours.")
-        return
-        
-    summary_data = []
-    locations = sorted(df_local['Location'].unique(), key=natural_sort_key)
-    
-    for loc in locations:
-        if 'AMBIENT' in str(loc).upper(): continue
-        
-        loc_df = df_local[df_local['Location'] == loc]
-        loc_24h = df_24h[df_24h['Location'] == loc]
-        
-        if loc_24h.empty: continue
-        
-        latest_nodes = loc_df.sort_values('timestamp').groupby('NodeNum').last().reset_index()
-        
-        if not latest_nodes.empty:
-            c_max_idx = latest_nodes['temperature'].idxmax()
-            c_min_idx = latest_nodes['temperature'].idxmin()
-            c_high_temp = latest_nodes.loc[c_max_idx, 'temperature']
-            c_high_node = latest_nodes.loc[c_max_idx, 'NodeNum']
-            c_low_temp = latest_nodes.loc[c_min_idx, 'temperature']
-            c_low_node = latest_nodes.loc[c_min_idx, 'NodeNum']
-        else:
-            c_high_temp, c_high_node, c_low_temp, c_low_node = None, "N/A", None, "N/A"
-        
-        def fmt_temp_node(t, n):
-            if pd.isnull(t): return "N/A"
-            return f"{t:.1f}{unit_label} ({n})"
-        
-        summary_data.append({
-            "Pipe / Location": loc,
-            "Current High": fmt_temp_node(c_high_temp, c_high_node),
-            "Current Low": fmt_temp_node(c_low_temp, c_low_node),
-        })
-        
-    st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
-
-def render_depth_profile_tab(full_p_df, unit_label, local_tz, orientation="vertical"):
-    is_horizontal = str(orientation).strip().lower() == "horizontal"
-    chart_type_label = "Distance" if is_horizontal else "Depth"
-    
-    st.subheader(f"📏 {chart_type_label} Profile Analysis")
-    lookback_weeks = 6 
-
-    df_local = full_p_df.copy()
-    df_local['timestamp'] = ensure_tz_convert(df_local['timestamp'], local_tz)
-    df_local['Depth_Num'] = pd.to_numeric(df_local['Depth'], errors='coerce')
-    depth_df = df_local.dropna(subset=['Depth_Num', 'Location']).copy()
-
-    depth_df = depth_df[
-        (~depth_df['Location'].str.upper().str.contains('OFFICE')) &
-        (~depth_df['Location'].str.upper().str.contains('DESK')) &
-        (~depth_df['Location'].str.upper().str.contains('TEST'))
-    ]
-
-    if depth_df.empty:
-        st.info("No sensors with valid 'Depth' values found in the Registry.")
+    if filtered_df.empty:
+        st.warning("No data found for the selected filters.")
         return
 
-    freeze_pt = 32
-    now_utc = pd.Timestamp.now(tz='UTC')
+    # Render Charts using internal logic
+    unique_locations = [loc for loc in filtered_df['Location'].dropna().unique() if 'AMBIENT' not in str(loc).upper()]
     
-    cutoff_date = now_utc - pd.Timedelta(weeks=lookback_weeks)
-    mondays = pd.date_range(start=cutoff_date, end=now_utc, freq='W-MON')
-    
-    locations = sorted(depth_df['Location'].unique(), key=natural_sort_key)
+    start_date = filtered_df['timestamp'].min()
+    end_date = filtered_df['timestamp'].max()
 
-    for loc in locations:
-        with st.expander(f"📍 Temp vs {chart_type_label} - {loc}", expanded=True):
-            loc_data = depth_df[depth_df['Location'] == loc].copy()
-            fig = go.Figure()
-
-            # --- A. BASELINE Snapshots ---
-            baseline_ts = loc_data['timestamp'].min()
-            b_window = loc_data[
-                (loc_data['timestamp'] >= baseline_ts - pd.Timedelta(hours=12)) & 
-                (loc_data['timestamp'] <= baseline_ts + pd.Timedelta(hours=12))
-            ]
-
-            baseline_date_str = ""
-            snap_base = pd.DataFrame()
-            if not b_window.empty:
-                baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
-                snap_base = (
-                    b_window.assign(diff=(b_window['timestamp'] - baseline_ts).abs())
-                    .sort_values(['NodeNum', 'diff'])
-                    .drop_duplicates('NodeNum')
-                    .sort_values('Depth_Num')
-                )
-
-            # --- B. RECENT 6 AM Snapshots ---
-            loc_data['date_str'] = loc_data['timestamp'].dt.strftime('%Y-%m-%d')
-            loc_data['hour_int'] = loc_data['timestamp'].dt.hour
+    for loc in sorted(unique_locations):
+        loc_data = filtered_df[filtered_df['Location'] == loc]
+        if loc_data.empty: continue
             
-            recent_6am_date_str = ""
-            recent_profile_rows = []
-            
-            if not loc_data.empty:
-                sorted_all_dates = sorted(loc_data['date_str'].unique(), reverse=True)
-                for candidate_date in sorted_all_dates:
-                    if candidate_date == baseline_date_str:
-                        continue
-                    
-                    day_pool = loc_data[loc_data['date_str'] == candidate_date]
-                    if day_pool.empty:
-                        continue
-                        
-                    recent_6am_date_str = candidate_date
-                    for node_id, node_group in day_pool.groupby('NodeNum'):
-                        exact_6am = node_group[node_group['hour_int'] == 6]
-                        if not exact_6am.empty:
-                            recent_profile_rows.append(exact_6am.sort_values('timestamp').iloc[-1])
-                        else:
-                            node_group = node_group.assign(hour_dist=(node_group['hour_int'] - 6).abs())
-                            best_fallback_row = node_group.sort_values(by=['hour_dist', 'timestamp']).iloc[0]
-                            recent_profile_rows.append(best_fallback_row)
-                    break
+        fig = build_high_speed_graph(
+            client=bq_client,  
+            df=loc_data, 
+            title=f"Thermal Trends: {loc}",
+            start_view=start_date, 
+            end_view=end_date, 
+            active_refs=active_refs,
+            unit_mode=unit_mode,
+            unit_label=unit_label,
+            display_tz=display_tz,
+            curve_id=f"{job_num}-{loc}"
+        )
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+            st.markdown("---")
 
-            snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
-
-            # --- C. HISTORICAL SNAPSHOTS ---
-            for m_date in mondays:
-                target_ts = m_date.tz_convert(local_tz).replace(hour=6, minute=0, second=0)
-                current_loop_date = target_ts.strftime('%Y-%m-%d')
-
-                if current_loop_date == baseline_date_str or current_loop_date == recent_6am_date_str:
-                    continue
-
-                window = loc_data[
-                    (loc_data['timestamp'] >= target_ts - pd.Timedelta(hours=12)) & 
-                    (loc_data['timestamp'] <= target_ts + pd.Timedelta(hours=12))
-                ]
-
-                if not window.empty:
-                    snap_week = (
-                        window.assign(diff=(window['timestamp'] - target_ts).abs())
-                        .sort_values(['NodeNum', 'diff'])
-                        .drop_duplicates('NodeNum')
-                        .sort_values('Depth_Num')
-                    )
-                    
-                    # DYNAMIC AXES
-                    x_week = snap_week['Depth_Num'] if is_horizontal else snap_week['temperature']
-                    y_week = snap_week['temperature'] if is_horizontal else snap_week['Depth_Num']
-                    ht_week = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
-
-                    fig.add_trace(go.Scatter(
-                        x=x_week, y=y_week, mode='lines+markers', 
-                        name=current_loop_date, line=dict(shape='spline', smoothing=1.1, width=1.5), marker=dict(size=4),
-                        hovertemplate=ht_week
-                    ))
-
-            # --- D. INJECT THE MOST RECENT LINE ---
-            if not snap_recent.empty:
-                x_rec = snap_recent['Depth_Num'] if is_horizontal else snap_recent['temperature']
-                y_rec = snap_recent['temperature'] if is_horizontal else snap_recent['Depth_Num']
-                ht_rec = f"Most Recent: %{{text}}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
-
-                fig.add_trace(go.Scatter(
-                    x=x_rec, y=y_rec, mode='lines+markers',
-                    name=f'<b>Most Recent ({recent_6am_date_str} 6AM*)</b>',
-                    line=dict(color='#ff7f0e', width=3.5, shape='spline', smoothing=1.1),
-                    marker=dict(size=6, color='#ff7f0e'),
-                    hovertemplate=ht_rec,
-                    text=snap_recent['timestamp'].dt.strftime('%b %d, %H:%M')
-                ))
-
-            # --- E. INJECT BASELINE ---
-            if not snap_base.empty:
-                x_base = snap_base['Depth_Num'] if is_horizontal else snap_base['temperature']
-                y_base = snap_base['temperature'] if is_horizontal else snap_base['Depth_Num']
-                ht_base = f"Baseline: {baseline_date_str}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
-
-                fig.add_trace(go.Scatter(
-                    x=x_base, y=y_base, mode='lines+markers', 
-                    name=f'<b>Baseline ({baseline_date_str})</b>',
-                    line=dict(color='black', width=3, dash='dash'),
-                    marker=dict(size=5, color='black'),
-                    hovertemplate=ht_base
-                ))
-
-            # FLIP THRESHOLD LINE
-            if is_horizontal:
-                fig.add_hline(y=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
-            else:
-                fig.add_vline(x=freeze_pt, line_width=2, line_dash="solid", line_color="#ADD8E6")
-
-            max_depth = loc_data['Depth_Num'].max()
-            limit_val = int(((max_depth // 10) + 1) * 10) if pd.notnull(max_depth) else 50
-
-            # DYNAMIC LAYOUT
-            dist_axis = dict(
-                title=f"{chart_type_label} (ft)", range=[0, limit_val] if is_horizontal else [limit_val, 0], dtick=10,
-                minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                gridcolor='Silver', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
-            )
-            temp_axis = dict(
-                title=f"Temperature ({unit_label})", range=[-20, 80], dtick=10,
-                minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8'),
-                gridcolor='Gainsboro', showline=True, linewidth=2, linecolor='black', mirror=True, zeroline=False
-            )
-
-            fig.update_layout(
-                title=f"<b>Temp vs {chart_type_label} - {loc}</b>", 
-                plot_bgcolor='white', 
-                height=800,
-                margin=dict(l=60, r=40, t=80, b=80), 
-                xaxis=dist_axis if is_horizontal else temp_axis,
-                yaxis=temp_axis if is_horizontal else dist_axis,
-                legend=dict(orientation="h", y=-0.1, xanchor="center", x=0.5)
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"depth_cht_portal_{loc}", theme=None)
-            
-def render_client_portal():
+# ===============================================================
+# 4. MAIN APP EXECUTION
+# ===============================================================
+def main():
     client = get_bq_client()
     if client is None: return
 
-    root_job_id = str(TARGET_JOB_NUMBER).split('-')[0].strip()
-    proj_q = f"SELECT * FROM `{PROJECT_REGISTRY_TABLE}` WHERE SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)] = '{root_job_id}'"
-    proj_registry = client.query(proj_q).to_dataframe()
-
-    if proj_registry.empty:
-        st.error(f"❌ No registry entry found for Job #{TARGET_JOB_NUMBER}")
-        return
-    
+    # Fetch Data once for the whole session
     with st.spinner("Synchronizing official records..."):
         master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
-
-    if master_df.empty:
+        
+    if master_df is None or master_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
 
-    master_df = master_df[(master_df['temperature'] >= -30.0) & (master_df['temperature'] <= 120.0)]
-    master_df = master_df[
-        (~master_df['Location'].str.upper().str.contains('OFFICE')) &
-        (~master_df['Location'].str.upper().str.contains('DESK')) &
-        (~master_df['Location'].str.upper().str.contains('TEST'))
-    ]
-
-    proj_registry['Project'] = proj_registry['Project'].astype(str).str.strip()
-    master_df['Project'] = master_df['Project'].astype(str).str.strip()
+    job_num_root = str(TARGET_JOB_NUMBER).split('-')[0].strip()
     
-    show_theoretical = True
-    show_ambient = True
-    show_elevation = False
-    show_as_built = True
-    weeks_view = 6
-
-    # ===============================================================
-    # --- DYNAMIC PHASE & SYSTEM FILTERS ---
-    # ===============================================================
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    available_phases = []
-    if 'Phase' in master_df.columns:
-        available_phases = sorted(
-            [str(p) for p in master_df['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']], 
-            key=natural_sort_key
-        )
-        
-    full_p_df = master_df.copy()
-    selected_phase = None
-    
-    # 1. PHASE SELECTOR
-    if len(available_phases) > 1:
-        selected_phase = st.selectbox("📂 **Select Project Phase:**", available_phases)
-        full_p_df = full_p_df[full_p_df['Phase'].astype(str) == str(selected_phase).strip()]
-    elif len(available_phases) == 1:
-        selected_phase = available_phases[0]
-        full_p_df = full_p_df[full_p_df['Phase'].astype(str) == str(selected_phase).strip()]
-
-    # 2. SYSTEM SELECTOR
-    available_systems = []
-    if not full_p_df.empty and 'System' in full_p_df.columns:
-        available_systems = sorted(
-            [str(s) for s in full_p_df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']], 
-            key=natural_sort_key
-        )
-        
-        if len(available_systems) > 1:
-            selected_systems = st.multiselect(
-                f"⚙️ **Filter by System:** (Leave blank to view all systems in {selected_phase if selected_phase else 'project'})", 
-                options=available_systems, 
-                default=[]  
-            )
-            
-            if selected_systems:
-                full_p_df = full_p_df[full_p_df['System'].astype(str).isin(selected_systems)]
-
-    if len(available_phases) > 1 or len(available_systems) > 1:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        
-    if full_p_df.empty:
-        st.error("❌ No data found for the selected Phase/System filters.")
-        st.stop()
-
-    ambient_mask_master = master_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-    ambient_data_global = master_df[ambient_mask_master].copy()
-    
-    if not full_p_df.empty:
-        ambient_mask_phase = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-        if not ambient_data_global.empty and not ambient_mask_phase.any():
-            full_p_df = pd.concat([full_p_df, ambient_data_global], ignore_index=True)
-
-    # --- REGISTRY METADATA LOOKUP ---
-    root_row = proj_registry[proj_registry['Project'].astype(str).str.strip() == root_job_id]
-    if root_row.empty:
-        root_row = proj_registry.iloc[[0]]
-
-    phase_row = root_row 
-    if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
-        phase_num_clean = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
-        
-        # STRICT MATCHING: Prevents the "1" in "2541" from accidentally matching Phase 2
-        specific_row = proj_registry[
-            proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(phase_num_clean)}$', na=False) |
-            proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(phase_num_clean)}\b', na=False)
-        ]
-        
-        if not specific_row.empty:
-            phase_row = specific_row
-
-    primary_meta = phase_row.iloc[0].to_dict()
-    root_meta = root_row.iloc[0].to_dict()
-    
-    # ===============================================================
-    # THE BULLETPROOF EXTRACTOR 
-    # ===============================================================
-    def get_orient(meta_dict):
-        # Loop through every column to find orientation, ignoring case entirely
-        for key, val in meta_dict.items():
-            if str(key).lower() == 'orientation':
-                if pd.notnull(val) and str(val).strip().lower() not in ['nan', 'none', '']:
-                    return str(val).strip().lower()
-        return None
-        
-    # Safely checks the Phase Row, then Root Row, then defaults to vertical
-    p_orientation = get_orient(primary_meta) or get_orient(root_meta) or "vertical"
-        
-    raw_project_name = primary_meta.get('ProjectName', f"Project {root_job_id}")
-    base_project_name = re.split(r'(?i)\s*-\s*Phase', raw_project_name)[0].strip()
-    local_tz = primary_meta.get('Timezone', 'US/Pacific')
-    
-    st.title(f"📊 {base_project_name}")
-    
-    last_approved_local = ensure_tz_convert(full_p_df['timestamp'], local_tz).max()
-    if pd.notnull(last_approved_local):
-        st.info(f"✅ **Official Data Status:** Records approved through **{last_approved_local.strftime('%B %d, %Y at %I:%M %p')}**.")
-
-    # --- TABS NOW HAVE DYNAMIC TITLES ---
+    # Render the modular Tabs
     tabs = st.tabs([
         "🏠 Summary", 
         "📈 Timeline Analysis", 
-        f"📏 {'Distance' if p_orientation == 'horizontal' else 'Depth'} Profile", 
-        "📋 Summary Table", 
+        "📏 Profile Analysis", 
         "🗺️ As Built"
     ])
     
     with tabs[0]:
-        render_summary_tab(master_df, "°F", local_tz, base_project_name, proj_registry)
-
+        # NOTE: Depending on how render_summary_dashboard handles single projects, 
+        # you may need to ensure it uses the TARGET_JOB_NUMBER to filter the registry query.
+        render_summary_dashboard(TARGET_JOB_NUMBER, unit_label, unit_mode, display_tz)
+        
     with tabs[1]:
-        ambient_mask = full_p_df['Location'].astype(str).str.upper().str.contains('AMBIENT')
-        ambient_df = full_p_df[ambient_mask].copy()
+        # This calls the fragment, keeping dropdown interactions lightning fast
+        render_interactive_timeline(master_df, job_num_root, client)
         
-        raw_locs = [str(loc) for loc in full_p_df['Location'].dropna().unique()]
-        locations = sorted([loc for loc in raw_locs if 'AMBIENT' not in loc.upper()], key=natural_sort_key)
-        
-        try:
-            map_query = f"""
-                SELECT Project, Location, Map_X, Map_Y, Image_Name 
-                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
-                WHERE CAST(Project AS STRING) = '{root_job_id}'
-            """
-            df_all_locs = client.query(map_query).to_dataframe()
-        except Exception as e:
-            df_all_locs = pd.DataFrame()
-            st.error(f"⚠️ BigQuery Table Error: {e}")
-
-        for loc in locations:
-            with st.expander(f"📍 {loc} Thermal Trend", expanded=True):
-                loc_data = full_p_df[full_p_df['Location'] == loc].copy()
-                
-                matched_project_id = loc_data['Project'].iloc[0]
-                current_phase_row = proj_registry[proj_registry['Project'] == matched_project_id]
-                
-                loc_last_data_ts = ensure_tz_convert(loc_data['timestamp'], local_tz).max()
-                
-                loc_f_start_date = None
-                if not current_phase_row.empty:
-                    raw_phase_fd = current_phase_row.iloc[0].get('Date_Freezedown')
-                    if pd.notnull(raw_phase_fd):
-                        loc_f_start_date = pd.to_datetime(raw_phase_fd).date()
-                        
-                loc_start_view = loc_last_data_ts - timedelta(weeks=weeks_view)
-                
-                if loc_f_start_date:
-                    project_start = pd.Timestamp(loc_f_start_date).tz_localize(local_tz)
-                    if loc_start_view < project_start:
-                        loc_start_view = project_start
-                
-                loc_upper = str(loc).upper().strip()
-                is_brine_pipe = (
-                    loc_upper.startswith('S') or 
-                    loc_upper.startswith('R') or 
-                    any(x in loc_upper for x in ['SUPPLY', 'RETURN', 'BRINE', 'BANK'])
-                )
-                
-                graph_curve_id = None if is_brine_pipe else f"{matched_project_id}-{loc}"
-                target_ambient = ambient_df if is_brine_pipe else None
-
-                has_map = False
-                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
-                    has_map = str(loc) in df_all_locs['Location'].astype(str).values
-                
-                if has_map and show_as_built:
-                    col_chart, col_map = st.columns([3, 1])
-                    with col_chart:
-                        fig = build_high_speed_graph(
-                            df=loc_data, title=f"{loc} History", start_view=loc_start_view, 
-                            end_view=loc_last_data_ts + timedelta(hours=2), unit_mode="Fahrenheit", 
-                            unit_label="°F", display_tz=local_tz, f_start_date=loc_f_start_date, 
-                            curve_id=graph_curve_id, ambient_df=target_ambient, target_phase=selected_phase,
-                            show_theoretical=show_theoretical, show_ambient=show_ambient, show_elevation=show_elevation
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    with col_map:
-                        site_map_fig = build_cropped_site_map(
-                            project_id=root_job_id, location_name=loc, df_map=df_all_locs, as_built_dir="as_builts"
-                        )
-                        if site_map_fig:
-                            st.plotly_chart(site_map_fig, use_container_width=True)
-                        else:
-                            st.info(f"🗺️ Map image for {root_job_id} not found in the as_builts folder.")
-                else:
-                    fig = build_high_speed_graph(
-                        df=loc_data, title=f"{loc} History", start_view=loc_start_view, 
-                        end_view=loc_last_data_ts + timedelta(hours=2), unit_mode="Fahrenheit", 
-                        unit_label="°F", display_tz=local_tz, f_start_date=loc_f_start_date, 
-                        curve_id=graph_curve_id, ambient_df=target_ambient, target_phase=selected_phase,
-                        show_theoretical=show_theoretical, show_ambient=show_ambient, show_elevation=show_elevation
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
     with tabs[2]:
-        render_depth_profile_tab(full_p_df, "°F", local_tz, orientation=p_orientation)
-    
-    with tabs[3]:
-        st.subheader("📋 24-Hour Pipe Summary Table")
-        render_pipe_summary_table(full_p_df, "°F", local_tz)
+        # Reuses the exact depth charts from your internal app
+        render_depth_charts(TARGET_JOB_NUMBER, unit_label, display_tz, orientation="vertical")
         
-    with tabs[4]:
-        if show_as_built:
-            current_asbuilt_meta = primary_meta
-            if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
-                phase_num_clean = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
-                matching_reg_row = proj_registry[
-                    proj_registry['Project'].astype(str).str.contains(fr'(?i)-(PHASE\s*)?0?{re.escape(phase_num_clean)}$', na=False) |
-                    proj_registry['ProjectName'].astype(str).str.contains(fr'(?i)\bPHASE\s*{re.escape(phase_num_clean)}\b', na=False)
-                ]
-                if not matching_reg_row.empty:
-                    current_asbuilt_meta = matching_reg_row.iloc[0].to_dict()
-
-            asbuilt_raw = current_asbuilt_meta.get('AsBuiltFile')
-            
-            if pd.notnull(asbuilt_raw) and str(asbuilt_raw).strip() != "":
-                all_asbuilt_filenames = [f.strip() for f in re.split(r'[,;]', str(asbuilt_raw)) if f.strip()]
-                asbuilt_filenames = []
-                if selected_phase and str(selected_phase).strip().upper() not in ['DEFAULT', 'UNASSIGNED PHASE']:
-                    phase_num = re.sub(r'(?i)PHASE\s*', '', str(selected_phase)).strip()
-                    target_pattern = fr"{root_job_id}-{phase_num}-"
-                    asbuilt_filenames = [f for f in all_asbuilt_filenames if target_pattern in f]
-                
-                if not asbuilt_filenames:
-                    asbuilt_filenames = all_asbuilt_filenames
-
-                if not asbuilt_filenames:
-                     st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-                else:
-                    for filename in asbuilt_filenames:
-                        possible_paths = [os.path.join("as_builts", filename), filename]
-                        img_found = False
-                        for path in possible_paths:
-                            if os.path.exists(path):
-                                try:
-                                    with open(path, "rb") as img_file:
-                                        img_bytes = img_file.read()
-                                    st.image(img_bytes, caption=f"Project Plan: {filename}", use_container_width=True)
-                                    st.markdown("<br>", unsafe_allow_html=True) 
-                                    img_found = True
-                                    break
-                                except Exception as img_err:
-                                    st.error(f"⚠️ Failed to decode image file stream for {filename}: {img_err}")
-                                    img_found = True 
-                                    break
-                        if not img_found:
-                            st.error(f"❌ Drawing Not Found: '{filename}' in the as_builts folder.")
+    with tabs[3]:
+        st.subheader("🗺️ Site As-Builts")
+        as_builts_dir = "as_builts"
+        if os.path.exists(as_builts_dir):
+            found_images = sorted([
+                f for f in os.listdir(as_builts_dir) 
+                if f.startswith(job_num_root) and f.lower().endswith(('.png', '.jpg', '.jpeg'))
+            ])
+            if found_images:
+                for img_name in found_images:
+                    st.image(os.path.join(as_builts_dir, img_name), caption=img_name, use_container_width=True)
+                    st.markdown("---")
             else:
-                st.info("ℹ️ The as-built site plan is currently being processed or has not been assigned in the Project Registry.")
-                
-# --- EXECUTION ---
-render_client_portal()
+                st.info("ℹ️ Site plan is currently being processed or has not been assigned.")
+        else:
+            st.warning("As-builts directory not found.")
+
+if __name__ == "__main__":
+    main()
