@@ -7,11 +7,11 @@ from app.data.processor import get_universal_portal_data, get_bq_client
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
 from app.pages.summary import render_summary_dashboard
 from app.pages.depth import render_depth_charts
+from app.utils.config import PROJECT_ID, DATASET_ID
 
 # ===============================================================
 # 1. AUTHENTICATION & UI LOCKDOWN
 # ===============================================================
-# Try to get the job from secrets (for single-client deployments) or query params
 TARGET_JOB_NUMBER = None
 if "JOB_NUMBER" in st.secrets:
     TARGET_JOB_NUMBER = str(st.secrets["JOB_NUMBER"])
@@ -45,7 +45,6 @@ if not TARGET_JOB_NUMBER:
 # ===============================================================
 # 2. CLIENT DEFAULTS (Injecting required session states)
 # ===============================================================
-# Your internal modules rely on these session states. We hardcode them for the client view.
 st.session_state['selected_project'] = TARGET_JOB_NUMBER
 st.session_state['global_show_archived'] = False
 st.session_state['global_show_ambient'] = True
@@ -54,22 +53,21 @@ st.session_state['global_show_map'] = True
 st.session_state['global_show_baddata'] = False
 st.session_state['global_show_masked'] = False
 st.session_state['global_show_ref'] = True
-st.session_state['global_lookback_days'] = 42 # Default 6 weeks for client view
+st.session_state['global_lookback_days'] = 42 
 
 unit_mode = "Fahrenheit"
 unit_label = "°F"
 st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
-# You can fetch this dynamically from project registry, or default it
 display_tz = "US/Pacific" 
 st.session_state["display_tz"] = display_tz
 active_refs = [(32.0, "Freezing")]
+st.session_state["active_refs"] = active_refs
 
 # ===============================================================
-# 3. INTERACTIVE FRAGMENT (The Speed Fix)
+# 3. INTERACTIVE FRAGMENT (The Speed Fix & Map Restoration)
 # ===============================================================
-# Wrapping this in @st.fragment means interacting with dropdowns will NOT rerun the whole script.
 @st.fragment
 def render_interactive_timeline(df, job_num, bq_client):
     st.write("### 📈 Timeline Analysis")
@@ -77,18 +75,20 @@ def render_interactive_timeline(df, job_num, bq_client):
     available_phases = sorted([str(p) for p in df['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']])
     available_systems = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '', 'UNASSIGNED']])
     
-    col1, col2 = st.columns(2)
     selected_phase = None
     selected_systems = []
     
-    with col1:
-        if len(available_phases) > 1:
-            selected_phase = st.selectbox("📂 Select Project Phase:", ["All Phases"] + available_phases)
-    with col2:
-        if len(available_systems) > 1:
-            selected_systems = st.multiselect("⚙️ Filter by System:", options=available_systems, default=[])
-            
-    # Apply Filters seamlessly
+    # ONLY render the filter columns if there are actual choices to make
+    if len(available_phases) > 1 or len(available_systems) > 1:
+        col1, col2 = st.columns(2)
+        with col1:
+            if len(available_phases) > 1:
+                selected_phase = st.selectbox("📂 Select Project Phase:", ["All Phases"] + available_phases)
+        with col2:
+            if len(available_systems) > 1:
+                selected_systems = st.multiselect("⚙️ Filter by System:", options=available_systems, default=[])
+                
+    # Apply Filters
     filtered_df = df.copy()
     if selected_phase and selected_phase != "All Phases":
         filtered_df = filtered_df[filtered_df['Phase'].astype(str) == str(selected_phase)]
@@ -99,7 +99,21 @@ def render_interactive_timeline(df, job_num, bq_client):
         st.warning("No data found for the selected filters.")
         return
 
-    # Render Charts using internal logic
+    st.divider()
+    
+    # FETCH MAP COORDINATES ONCE
+    try:
+        map_query = f"""
+            SELECT Project, Location, Map_X, Map_Y, Image_Name 
+            FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+            WHERE CAST(Project AS STRING) = '{job_num}'
+        """
+        df_all_locs = bq_client.query(map_query).to_dataframe()
+    except Exception as e:
+        df_all_locs = pd.DataFrame()
+        st.error(f"⚠️ Map Registry Error: {e}")
+
+    # Render Charts & Maps side-by-side
     unique_locations = [loc for loc in filtered_df['Location'].dropna().unique() if 'AMBIENT' not in str(loc).upper()]
     
     start_date = filtered_df['timestamp'].min()
@@ -109,21 +123,59 @@ def render_interactive_timeline(df, job_num, bq_client):
         loc_data = filtered_df[filtered_df['Location'] == loc]
         if loc_data.empty: continue
             
-        fig = build_high_speed_graph(
-            client=bq_client,  
-            df=loc_data, 
-            title=f"Thermal Trends: {loc}",
-            start_view=start_date, 
-            end_view=end_date, 
-            active_refs=active_refs,
-            unit_mode=unit_mode,
-            unit_label=unit_label,
-            display_tz=display_tz,
-            curve_id=f"{job_num}-{loc}"
-        )
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown("---")
+        # Check if this specific location has map coordinates
+        has_map = False
+        if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+            has_map = str(loc) in df_all_locs['Location'].astype(str).values
+            
+        if has_map and st.session_state.get('global_show_map', True):
+            # Split layout: Chart on left, Map on right
+            col_chart, col_map = st.columns([3, 1])
+            with col_chart:
+                fig = build_high_speed_graph(
+                    client=bq_client,  
+                    df=loc_data, 
+                    title=f"Thermal Trends: {loc}",
+                    start_view=start_date, 
+                    end_view=end_date, 
+                    active_refs=active_refs,
+                    unit_mode=unit_mode,
+                    unit_label=unit_label,
+                    display_tz=display_tz,
+                    curve_id=f"{job_num}-{loc}"
+                )
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_map:
+                site_map_fig = build_cropped_site_map(
+                    project_id=job_num, 
+                    location_name=loc, 
+                    df_map=df_all_locs,
+                    as_built_dir="as_builts"
+                )
+                if site_map_fig:
+                    st.plotly_chart(site_map_fig, use_container_width=True)
+                else:
+                    st.info(f"🗺️ Map image for {job_num} not found in the as_builts folder.")
+        else:
+            # Full width layout if no map data exists for this hole
+            fig = build_high_speed_graph(
+                client=bq_client,  
+                df=loc_data, 
+                title=f"Thermal Trends: {loc}",
+                start_view=start_date, 
+                end_view=end_date, 
+                active_refs=active_refs,
+                unit_mode=unit_mode,
+                unit_label=unit_label,
+                display_tz=display_tz,
+                curve_id=f"{job_num}-{loc}"
+            )
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
 
 # ===============================================================
 # 4. MAIN APP EXECUTION
@@ -132,7 +184,6 @@ def main():
     client = get_bq_client()
     if client is None: return
 
-    # Fetch Data once for the whole session
     with st.spinner("Synchronizing official records..."):
         master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
         
@@ -142,7 +193,6 @@ def main():
 
     job_num_root = str(TARGET_JOB_NUMBER).split('-')[0].strip()
     
-    # Render the modular Tabs
     tabs = st.tabs([
         "🏠 Summary", 
         "📈 Timeline Analysis", 
@@ -151,16 +201,12 @@ def main():
     ])
     
     with tabs[0]:
-        # NOTE: Depending on how render_summary_dashboard handles single projects, 
-        # you may need to ensure it uses the TARGET_JOB_NUMBER to filter the registry query.
         render_summary_dashboard(TARGET_JOB_NUMBER, unit_label, unit_mode, display_tz)
         
     with tabs[1]:
-        # This calls the fragment, keeping dropdown interactions lightning fast
         render_interactive_timeline(master_df, job_num_root, client)
         
     with tabs[2]:
-        # Reuses the exact depth charts from your internal app
         render_depth_charts(TARGET_JOB_NUMBER, unit_label, display_tz, orientation="vertical")
         
     with tabs[3]:
