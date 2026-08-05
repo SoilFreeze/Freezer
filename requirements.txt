@@ -15,10 +15,6 @@ kaleido==0.2.1
 openpyxl
 xlrd
 pyarrow
-streamlit-plotly-events
 google-cloud-bigquery-storage
-pyarrow
-db-dtypes
 matplotlib
-streamlit-image-coordinates
 Pillow
