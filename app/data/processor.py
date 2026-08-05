@@ -1,10 +1,33 @@
-import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from app.utils import config 
+import re
 
-@st.cache_resource
+# --- SAFE FRAMEWORK DETECTION ---
+try:
+    import streamlit as st
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
+
+def safe_cache(ttl=600):
+    """Uses Streamlit cache if available, otherwise just runs the function."""
+    def decorator(func):
+        if HAS_STREAMLIT:
+            return st.cache_data(ttl=ttl)(func)
+        return func
+    return decorator
+
+def safe_cache_resource():
+    """Uses Streamlit cache_resource if available, otherwise just runs the function."""
+    def decorator(func):
+        if HAS_STREAMLIT:
+            return st.cache_resource(func)
+        return func
+    return decorator
+
+@safe_cache_resource()
 def get_bq_client():
     SCOPES = [
         "https://www.googleapis.com/auth/bigquery",
@@ -12,25 +35,32 @@ def get_bq_client():
         "https://www.googleapis.com/auth/spreadsheets"
     ]
     
-    # 1. Start the try block BEFORE the code that might fail
     try:
-        if "gcp_service_account" in st.secrets:
+        # If running in Streamlit, use st.secrets
+        if HAS_STREAMLIT and "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
-            # Ensure 'with_scopes' is used to apply the necessary permissions
             credentials = service_account.Credentials.from_service_account_info(
                 info
             ).with_scopes(SCOPES)
-            
             return bigquery.Client(credentials=credentials, project=info["project_id"])
-        
-        return None
-    
-    # 2. The except block now correctly follows the try block
+            
+        # If running in Shiny (or locally), fall back to environment variables
+        # Google's library automatically looks for GOOGLE_APPLICATION_CREDENTIALS in the environment
+        else:
+            import os
+            # If deploying to Posit Connect, ensure GOOGLE_APPLICATION_CREDENTIALS points to a valid JSON key
+            if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                return bigquery.Client()
+            return None
+            
     except Exception as e:
-        st.error(f"❌ BigQuery Authentication Failed: {e}")
+        if HAS_STREAMLIT:
+            st.error(f"❌ BigQuery Authentication Failed: {e}")
+        else:
+            print(f"❌ BigQuery Authentication Failed: {e}")
         return None
 
-@st.cache_data(ttl=600)
+@safe_cache(ttl=600)
 def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=False, show_masked=False, show_baddata=False):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
@@ -40,7 +70,6 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
     # Build dynamic phase matching for the SQL query
     phase_sql = ""
     if not is_summary_page:
-        import re
         phase_match = re.search(r'(?i)Phase\s*(\d+)', str(project_id))
         if phase_match:
             target_phase = phase_match.group(1)
@@ -112,8 +141,8 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
             COALESCE(NULLIF(v.Reg_System, ''), m.System) as System,
             m.Hardware,
             m.approval_status,
-            m.BaseElevation,   -- Added to pull the column into Streamlit
-            m.node_elevation   -- Added to pull the column into Streamlit
+            m.BaseElevation,   
+            m.node_elevation   
         FROM `{config.MASTER_VIEW}` m
         INNER JOIN ProjectAssignments v 
           ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
@@ -143,17 +172,15 @@ def apply_sanity_filter(df):
     if df.empty or 'temperature' not in df.columns:
         return df
         
-    # Ensure the approval_status column exists
     if 'approval_status' not in df.columns:
         df['approval_status'] = 'TRUE'
         
-    # Find wild extremes and force their status to BADDATA
     extreme_mask = (df['temperature'] < -30.0) | (df['temperature'] > 120.0)
     df.loc[extreme_mask, 'approval_status'] = 'BADDATA'
     
     return df
 
-@st.cache_data(ttl=600)
+@safe_cache(ttl=600)
 def get_sensor_performance_data(project_id="All Projects"):
     """
     Calculates the health score and failure rate for sensors.
@@ -163,13 +190,11 @@ def get_sensor_performance_data(project_id="All Projects"):
     if client is None: 
         return pd.DataFrame()
     
-    # 1. Scope the query based on the active view
     project_filter = ""
     if project_id != "All Projects":
         root_job_id = str(project_id).split('-')[0].strip()
         project_filter = f"WHERE Project LIKE '{root_job_id}%'"
         
-    # 2. Let BigQuery calculate the exact ratios of good vs. bad data
     query = f"""
         SELECT 
             NodeNum,
@@ -182,7 +207,7 @@ def get_sensor_performance_data(project_id="All Projects"):
         FROM `{config.MASTER_VIEW}`
         {project_filter}
         GROUP BY NodeNum
-        HAVING Total_Readings > 10  -- Ignore brand new sensors with barely any data
+        HAVING Total_Readings > 10  
         ORDER BY Failure_Rate_Pct DESC, Bad_Readings DESC
     """
     
@@ -190,5 +215,8 @@ def get_sensor_performance_data(project_id="All Projects"):
         df = client.query(query).to_dataframe()
         return df
     except Exception as e:
-        st.error(f"Failed to fetch performance data: {e}")
+        if HAS_STREAMLIT:
+            st.error(f"Failed to fetch performance data: {e}")
+        else:
+            print(f"Failed to fetch performance data: {e}")
         return pd.DataFrame()
