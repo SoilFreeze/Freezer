@@ -1,4 +1,6 @@
 shiny
+shinywidgets
+python-dotenv
 starlette<0.37.0
 pandas
 plotly
