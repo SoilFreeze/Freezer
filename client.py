@@ -11,17 +11,15 @@ from app.components.charts import build_high_speed_graph
 # 1. THE UI (The layout blueprint)
 # ===============================================================
 app_ui = ui.page_navbar(
-    # The title of the web page
-    title="SoilFreeze Client Portal",
-    id="main_nav",
     
-    # --- TAB 1: Summary ---
+    # --- POSITIONAL ARGUMENTS MUST COME FIRST ---
+    # TAB 1: Summary 
     ui.nav_panel("🏠 Summary", 
         ui.h2("Project Summary"),
-        ui.output_ui("summary_cards") # Placeholder for your summary boxes
+        ui.output_ui("summary_cards") 
     ),
     
-    # --- TAB 2: Timeline ---
+    # TAB 2: Timeline 
     ui.nav_panel("📈 Timeline Analysis", 
         ui.layout_sidebar(
             ui.sidebar(
@@ -29,10 +27,20 @@ app_ui = ui.page_navbar(
                 ui.input_select("phase_filter", "📂 Select Phase:", choices=["Loading..."]),
                 ui.input_selectize("system_filter", "⚙️ Filter by System:", choices=[], multiple=True)
             ),
-            # This is where the Plotly chart will render
             output_widget("timeline_chart") 
         )
     ),
+    
+    # TAB 3: As-Builts 
+    ui.nav_panel("🗺️ As Built", 
+        ui.h2("Site As-Builts"),
+        ui.output_ui("as_built_images")
+    ),
+    
+    # --- KEYWORD ARGUMENTS MUST GO AT THE END ---
+    title="SoilFreeze Client Portal",
+    id="main_nav"
+)
     
     # --- TAB 3: As-Builts ---
     ui.nav_panel("🗺️ As Built", 
