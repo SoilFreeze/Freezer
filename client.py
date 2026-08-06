@@ -214,24 +214,16 @@ def server(input, output, session):
             )
             
             if fig:
-                # Use a unique widget ID incorporating the job number to prevent re-render collisions
-                widget_id = f"timeline_chart_{job}_{loc}" 
+                # Bypass Shiny's widget registry entirely by rendering the Plotly figure directly to HTML
+                plot_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+                
                 ui_elements.append(
                     ui.card(
-                        output_widget(widget_id),
+                        ui.HTML(plot_html),
                         full_screen=True,
                         style="margin-bottom: 20px;"
                     )
                 )
-                
-                # Dynamic rendering factory function required for Shiny loops
-                def make_render_func(plot_fig):
-                    @render_plotly
-                    def _render_chart():
-                        return plot_fig
-                    return _render_chart
-                    
-                session.output.register(widget_id, make_render_func(fig))
                 
         return ui.TagList(*ui_elements)
 
@@ -258,24 +250,17 @@ def server(input, output, session):
             
         ui_elements = []
         for loc, fig in figures_dict.items():
-            widget_id = f"depth_chart_{job}_{loc}"
+            # Bypass Shiny's widget registry entirely by rendering the Plotly figure directly to HTML
+            plot_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
             
             ui_elements.append(
                 ui.card(
                     ui.card_header(f"📍 Temp vs {chart_label} - {loc}"),
-                    output_widget(widget_id),
+                    ui.HTML(plot_html),
                     full_screen=True,
                     style="margin-bottom: 20px;"
                 )
             )
-            
-            def make_render_func(plot_fig):
-                @render_plotly
-                def _render_chart():
-                    return plot_fig
-                return _render_chart
-                
-            session.output.register(widget_id, make_render_func(fig))
             
         return ui.TagList(*ui_elements)
 
