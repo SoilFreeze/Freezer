@@ -168,6 +168,10 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
         snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
 
         # C. HISTORICAL
+        # --- NEW: Explicit color cycle to replace Streamlit's missing theme ---
+        hist_colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52']
+        c_idx = 0
+        
         for m_date in mondays:
             target_ts = m_date.replace(hour=6, minute=0, second=0)
             current_loop_date = target_ts.strftime('%Y-%m-%d')
@@ -195,11 +199,18 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
                 y_week = temps if is_horizontal else snap_week['Depth_Num']
                 ht_week = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
 
+                # Grab a new color from the sequence for this specific week
+                h_color = hist_colors[c_idx % len(hist_colors)]
+                c_idx += 1
+
                 fig.add_trace(go.Scatter(
                     x=x_week, y=y_week, mode='lines+markers', name=current_loop_date,
-                    line=dict(shape='spline', smoothing=1.1, width=1.5), marker=dict(size=4), hovertemplate=ht_week
+                    # --- NEW: Inject the explicit color into the line and marker dictionaries ---
+                    line=dict(color=h_color, shape='spline', smoothing=1.1, width=1.5), 
+                    marker=dict(color=h_color, size=4), 
+                    hovertemplate=ht_week
                 ))
-
+                
         # D. RECENT LINE INJECTION
         if not snap_recent.empty:
             recent_temps = snap_recent['temperature']
