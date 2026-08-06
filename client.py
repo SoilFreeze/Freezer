@@ -269,7 +269,9 @@ def server(input, output, session):
             return ui.p("Please provide a job number to view as-builts.", style="color: gray; font-style: italic;")
             
         job_root = str(job).split('-')[0].strip()
-        as_builts_dir = "as_builts"
+        
+        # Use an absolute path to ensure Posit Connect Cloud finds the folder
+        as_builts_dir = os.path.join(os.path.dirname(__file__), "as_builts")
         
         if not os.path.exists(as_builts_dir):
             return ui.div("As-builts directory not found.", style="color: orange;")
@@ -284,12 +286,14 @@ def server(input, output, session):
             
         image_elements = []
         for img_name in found_images:
-            img_path = os.path.join(as_builts_dir, img_name)
+            # Map the web source URL to the static asset folder we define below
+            img_src = f"/as_builts/{img_name}"
+            
             image_elements.append(
-                ui.div(
-                    ui.h5(img_name),
-                    ui.p(f"[Image Data: {img_path}] - Note: Static file serving requires 'www' directory configuration in Shiny."),
-                    style="border: 1px solid #ddd; padding: 10px; margin-bottom: 10px;"
+                ui.card(
+                    ui.h5(img_name, style="text-align: center; margin-bottom: 15px;"),
+                    ui.img(src=img_src, style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px;"),
+                    style="margin-bottom: 30px; padding: 20px; align-items: center;"
                 )
             )
             
