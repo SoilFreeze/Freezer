@@ -189,19 +189,21 @@ def server(input, output, session):
         end_date = df['timestamp'].max()
         job_root = str(job).split('-')[0].strip()
         
-        # --- Fetch map data and clean strings to guarantee a match ---
+        # --- Fetch map data and strictly standardize strings to guarantee a match ---
         df_all_locs = pd.DataFrame()
         try:
-            import app.utils.config as cfg
+            from app.utils.config import PROJECT_ID, DATASET_ID
             map_query = f"""
                 SELECT Project, Location, Map_X, Map_Y, Image_Name 
-                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.TempPipeLoc` 
+                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
                 WHERE CAST(Project AS STRING) = '{job_root}'
             """
             df_all_locs = client.query(map_query).to_dataframe()
-            # Clean up whitespace so charts.py matches perfectly
+            
             if not df_all_locs.empty and 'Location' in df_all_locs.columns:
-                df_all_locs['Location'] = df_all_locs['Location'].astype(str).str.strip()
+                # Force uppercase and strip spaces for bulletproof matching
+                df_all_locs['Location'] = df_all_locs['Location'].astype(str).str.strip().str.upper()
+                df_all_locs['Project'] = df_all_locs['Project'].astype(str).str.strip()
         except Exception as e:
             print(f"Warning: Map data fetch failed: {e}")
         
@@ -232,13 +234,13 @@ def server(input, output, session):
                 
                 # 2. Check Map Eligibility
                 has_map = False
-                loc_clean = str(loc).strip()
+                loc_clean = str(loc).strip().upper()
+                
                 if not df_all_locs.empty and 'Location' in df_all_locs.columns:
                     has_map = loc_clean in df_all_locs['Location'].values
                 
                 if has_map:
                     as_built_path = os.path.join(os.path.dirname(__file__), "as_builts")
-                    # Pass the cleaned string to ensure charts.py finds it
                     map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
                     
                     if map_fig:
@@ -246,12 +248,11 @@ def server(input, output, session):
                         escaped_map_html = html.escape(map_html)
                         map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
                         
-                        # --- THE FIX: Use layout_columns for uneven 75% / 25% split ---
-                        content = ui.layout_columns(
-                            ui.HTML(main_chart_iframe), 
-                            ui.HTML(map_iframe), 
-                            col_widths=(9, 3), # 9 cols for chart, 3 cols for map
-                            gap="10px"
+                        # --- THE FIX: Standard Bootstrap Grid ---
+                        # 9 columns for the chart (75%), 3 columns for the map (25%)
+                        content = ui.row(
+                            ui.column(9, ui.HTML(main_chart_iframe)),
+                            ui.column(3, ui.HTML(map_iframe))
                         )
                     else:
                         content = ui.HTML(main_chart_iframe)
