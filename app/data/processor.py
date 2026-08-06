@@ -1,4 +1,5 @@
 import pandas as pd
+import sys
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from app.utils import config 
@@ -7,7 +8,11 @@ import re
 # --- SAFE FRAMEWORK DETECTION ---
 try:
     import streamlit as st
-    HAS_STREAMLIT = True
+    # Smart detection: If Shiny is running the app, it will be in sys.modules.
+    if 'shiny' in sys.modules:
+        HAS_STREAMLIT = False
+    else:
+        HAS_STREAMLIT = True
 except ImportError:
     HAS_STREAMLIT = False
 
