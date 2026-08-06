@@ -247,9 +247,6 @@ def server(input, output, session):
                 if has_map:
                     map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
                     
-                    if has_map:
-                    map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
-                    
                     if map_fig:
                         map_html = map_fig.to_html(full_html=True, include_plotlyjs="cdn")
                         escaped_map_html = html.escape(map_html)
