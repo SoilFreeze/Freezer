@@ -189,14 +189,10 @@ def server(input, output, session):
         end_date = df['timestamp'].max()
         job_root = str(job).split('-')[0].strip()
         
-        # --- Fetch map data robustly & Catch Exact Errors ---
+        # --- Fetch map data robustly ---
         df_all_locs = pd.DataFrame()
-        fetch_error = "No errors detected during fetch."
-        
         try:
-            # Explicitly import the config credentials
             from app.utils.config import PROJECT_ID, DATASET_ID
-            
             map_query = f"""
                 SELECT CAST(Project AS STRING) as Project, CAST(Location AS STRING) as Location, Map_X, Map_Y, Image_Name 
                 FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
@@ -205,17 +201,11 @@ def server(input, output, session):
             df_all_locs = client.query(map_query).to_dataframe()
             
             if not df_all_locs.empty and 'Location' in df_all_locs.columns:
-                # Force uppercase and strip spaces for bulletproof matching
                 df_all_locs['Location'] = df_all_locs['Location'].astype(str).str.strip().str.upper()
                 df_all_locs['Project'] = df_all_locs['Project'].astype(str).str.strip()
-            else:
-                fetch_error = f"Query succeeded but found 0 rows for project: {job_root}"
-                
         except Exception as e:
-            fetch_error = f"BigQuery Crash: {str(e)}"
             print(f"Warning: Map data fetch failed: {e}")
             
-        # Guarantee absolute path to the as_builts folder for the cloud environment
         as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
         
         ui_elements = []
@@ -243,73 +233,34 @@ def server(input, output, session):
                 escaped_html = html.escape(plot_html)
                 main_chart_iframe = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
                 
+                # Default to full-width chart
                 content_html = main_chart_iframe
                 
-                # 2. Check Map Eligibility
-                has_map = False
+                # 2. Check Map Eligibility (Only allow Temp Pipes starting with 'T')
                 loc_clean = str(loc).strip().upper()
+                is_temp_pipe = loc_clean.startswith('T')
                 
-                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
-                    has_map = loc_clean in df_all_locs['Location'].values
-                
-                if has_map:
-                    map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
-                    
-                    if map_fig:
-                        map_html = map_fig.to_html(full_html=True, include_plotlyjs="cdn")
-                        escaped_map_html = html.escape(map_html)
-                        map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
+                if is_temp_pipe and not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                    if loc_clean in df_all_locs['Location'].values:
                         
-                        # --- BULLETPROOF RAW CSS FLEXBOX ---
-                        content_html = f"""
-                        <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
-                            <div style="flex: 3; min-width: 600px;">
-                                {main_chart_iframe}
-                            </div>
-                            <div style="flex: 1; min-width: 250px;">
-                                {map_iframe}
-                            </div>
-                        </div>
-                        """
-                    else:
-                        # VISUAL DEBUGGER: If it fails to build the map
-                        content_html = f"""
-                        <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
-                            <div style="flex: 3; min-width: 600px;">
-                                {main_chart_iframe}
-                            </div>
-                            <div style="flex: 1; min-width: 250px; display: flex; align-items: center; justify-content: center; background-color: #f8d7da; color: #721c24; border-radius: 5px; padding: 20px; text-align: center;">
-                                <div>
-                                    <b>⚠️ Map Image Error</b><br><br>
-                                    Coordinates found for {loc_clean}, but image could not be loaded from:<br>
-                                    <small style="word-break: break-all;">{as_built_path}</small>
+                        map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
+                        
+                        if map_fig:
+                            map_html = map_fig.to_html(full_html=True, include_plotlyjs="cdn")
+                            escaped_map_html = html.escape(map_html)
+                            map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
+                            
+                            # Upgrade to side-by-side flex layout since it's a valid Temp Pipe map!
+                            content_html = f"""
+                            <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
+                                <div style="flex: 3; min-width: 600px;">
+                                    {main_chart_iframe}
+                                </div>
+                                <div style="flex: 1; min-width: 250px;">
+                                    {map_iframe}
                                 </div>
                             </div>
-                        </div>
-                        """
-                else:
-                    # VISUAL DEBUGGER 2: Tells us exactly what BigQuery returned and any errors
-                    bq_locs = df_all_locs['Location'].tolist() if not df_all_locs.empty and 'Location' in df_all_locs.columns else "Empty DataFrame"
-                    
-                    content_html = f"""
-                    <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
-                        <div style="flex: 3; min-width: 600px;">
-                            {main_chart_iframe}
-                        </div>
-                        <div style="flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; background-color: #cce5ff; color: #004085; border-radius: 5px; padding: 20px; text-align: center;">
-                            <div>
-                                <b>ℹ️ Matching Debugger</b><br><br>
-                                Chart is looking for: <b>{loc_clean}</b><br><br>
-                                BigQuery Locations found:<br>
-                                <small style="word-break: break-all;">{bq_locs}</small><br><br>
-                            </div>
-                            <div style="margin-top: 15px; border-top: 1px solid #b8daff; padding-top: 15px; width: 100%;">
-                                <b>Status / Error Message:</b><br>
-                                <small style="color: #dc3545;">{fetch_error}</small>
-                            </div>
-                        </div>
-                    </div>
-                    """
+                            """
                 
                 ui_elements.append(
                     ui.card(
