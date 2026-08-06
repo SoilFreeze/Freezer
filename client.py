@@ -189,13 +189,13 @@ def server(input, output, session):
         end_date = df['timestamp'].max()
         job_root = str(job).split('-')[0].strip()
         
-        # --- Fetch map data and strictly standardize strings to guarantee a match ---
+        # --- Fetch map data robustly ---
         df_all_locs = pd.DataFrame()
         try:
-            from app.utils.config import PROJECT_ID, DATASET_ID
+            import app.utils.config as cfg
             map_query = f"""
-                SELECT Project, Location, Map_X, Map_Y, Image_Name 
-                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
+                SELECT CAST(Project AS STRING) as Project, CAST(Location AS STRING) as Location, Map_X, Map_Y, Image_Name 
+                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.TempPipeLoc` 
                 WHERE CAST(Project AS STRING) = '{job_root}'
             """
             df_all_locs = client.query(map_query).to_dataframe()
@@ -206,6 +206,9 @@ def server(input, output, session):
                 df_all_locs['Project'] = df_all_locs['Project'].astype(str).str.strip()
         except Exception as e:
             print(f"Warning: Map data fetch failed: {e}")
+            
+        # Guarantee absolute path to the as_builts folder for the cloud environment
+        as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
         
         ui_elements = []
         for loc in sorted(unique_locations):
@@ -232,6 +235,8 @@ def server(input, output, session):
                 escaped_html = html.escape(plot_html)
                 main_chart_iframe = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
                 
+                content_html = main_chart_iframe
+                
                 # 2. Check Map Eligibility
                 has_map = False
                 loc_clean = str(loc).strip().upper()
@@ -240,7 +245,6 @@ def server(input, output, session):
                     has_map = loc_clean in df_all_locs['Location'].values
                 
                 if has_map:
-                    as_built_path = os.path.join(os.path.dirname(__file__), "as_builts")
                     map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
                     
                     if map_fig:
@@ -248,20 +252,38 @@ def server(input, output, session):
                         escaped_map_html = html.escape(map_html)
                         map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
                         
-                        # --- THE FIX: Standard Bootstrap Grid ---
-                        # 9 columns for the chart (75%), 3 columns for the map (25%)
-                        content = ui.row(
-                            ui.column(9, ui.HTML(main_chart_iframe)),
-                            ui.column(3, ui.HTML(map_iframe))
-                        )
+                        # --- BULLETPROOF RAW CSS FLEXBOX ---
+                        # 75% width for the chart, 25% for the map. Will wrap cleanly on mobile screens.
+                        content_html = f"""
+                        <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
+                            <div style="flex: 3; min-width: 600px;">
+                                {main_chart_iframe}
+                            </div>
+                            <div style="flex: 1; min-width: 250px;">
+                                {map_iframe}
+                            </div>
+                        </div>
+                        """
                     else:
-                        content = ui.HTML(main_chart_iframe)
-                else:
-                    content = ui.HTML(main_chart_iframe)
+                        # VISUAL DEBUGGER: If it fails to build the map, tell us why on the screen!
+                        content_html = f"""
+                        <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
+                            <div style="flex: 3; min-width: 600px;">
+                                {main_chart_iframe}
+                            </div>
+                            <div style="flex: 1; min-width: 250px; display: flex; align-items: center; justify-content: center; background-color: #f8d7da; color: #721c24; border-radius: 5px; padding: 20px; text-align: center;">
+                                <div>
+                                    <b>⚠️ Map Image Error</b><br><br>
+                                    Coordinates found for {loc_clean}, but image could not be loaded from:<br>
+                                    <small style="word-break: break-all;">{as_built_path}</small>
+                                </div>
+                            </div>
+                        </div>
+                        """
                 
                 ui_elements.append(
                     ui.card(
-                        content,
+                        ui.HTML(content_html),
                         style="margin-bottom: 20px;"
                     )
                 )
