@@ -12,26 +12,24 @@ from app.components.charts import build_cropped_site_map
 from urllib.parse import parse_qs
 
 def server(input, output, session):
-    
     @reactive.Calc
     def current_job():
-        # 1. Diagnostic: Check if we are seeing any search string at all
+        # 1. Reactively check for URL query parameters
         search = session.clientdata.url_search()
-        print(f"DEBUG: URL search string detected: '{search}'")
-        
-        # 2. Extract job from URL if present
         if search:
             query_params = parse_qs(search.lstrip('?'))
             for key in ['job', 'job_number', 'project']:
                 if key in query_params:
                     val = query_params[key][0].strip()
                     if val:
-                        print(f"DEBUG: Found job via URL: {val}")
-                        # Update the UI widget so the user sees the right job number
-                        ui.update_text("job_number", value=val)
+                        # Automatically sync the sidebar text box to match the URL
+                        try:
+                            ui.update_text("job_number", value=val)
+                        except Exception:
+                            pass
                         return val
                         
-        # 3. Fall back to the sidebar input
+        # 2. Fall back to the manual sidebar text box if no URL parameter exists
         return input.job_number().strip()
 
 # ===============================================================
