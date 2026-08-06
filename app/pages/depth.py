@@ -1,13 +1,18 @@
 import pandas as pd
 import plotly.graph_objects as go
 import re
+import sys
 from app.data.processor import get_universal_portal_data
 from app.pages.admin import natural_sort_key
 
 # --- SAFE FRAMEWORK DETECTION ---
 try:
     import streamlit as st
-    HAS_STREAMLIT = True
+    # Smart detection: If Shiny is running the app, it will be in sys.modules.
+    if 'shiny' in sys.modules:
+        HAS_STREAMLIT = False
+    else:
+        HAS_STREAMLIT = True
 except ImportError:
     HAS_STREAMLIT = False
 
