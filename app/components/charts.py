@@ -6,7 +6,6 @@ from app.data.processor import get_bq_client
 from PIL import Image
 import os
 
-
 # --- SAFE FRAMEWORK DETECTION ---
 try:
     import streamlit as st
@@ -494,80 +493,3 @@ def get_soil_reference_curves(soil_type, start_date, unit_mode):
     x_times = [pd.Timestamp(start_date) + pd.Timedelta(days=d) for d, t in curve]
     y_temps = [t if unit_mode == "Fahrenheit" else (t - 32) * 5/9 for d, t in curve]
     return x_times, y_temps
-
-def build_cropped_site_map(project_id, location_name, df_map, as_built_dir="as_builts", window_size=500):
-    """
-    Generates a Plotly figure of a cropped section of the as-built image
-    centered on the given coordinates, with a red box indicator.
-    """
-    if df_map.empty: return None
-
-    # Find the specific row for this location
-    loc_row = df_map[(df_map['Project'].astype(str) == str(project_id)) & 
-                     (df_map['Location'].astype(str) == str(location_name))]
-    
-    if loc_row.empty: return None
-    
-    row_data = loc_row.iloc[0]
-    img_name = row_data.get('Image_Name')
-    
-    if pd.isna(img_name) or pd.isna(row_data.get('Map_X')) or pd.isna(row_data.get('Map_Y')):
-        return None
-        
-    img_path = os.path.join(as_built_dir, str(img_name))
-    if not os.path.exists(img_path): return None
-
-    try:
-        # Load and crop the image
-        img = Image.open(img_path)
-        img_width, img_height = img.size
-        
-        target_x = int(row_data['Map_X'])
-        target_y = int(row_data['Map_Y'])
-        half_window = window_size // 2
-        
-        left = max(0, target_x - half_window)
-        top = max(0, target_y - half_window)
-        right = min(img_width, target_x + half_window)
-        bottom = min(img_height, target_y + half_window)
-        
-        cropped_img = img.crop((left, top, right, bottom))
-        
-        # Calculate new relative coordinates for the red box
-        relative_x = target_x - left
-        relative_y = target_y - top
-        
-        # Build the figure
-        fig = go.Figure()
-        fig.add_layout_image(
-            dict(
-                source=cropped_img,
-                xref="x", yref="y",
-                x=0, y=cropped_img.size[1],  
-                sizex=cropped_img.size[0], sizey=cropped_img.size[1],
-                sizing="stretch", opacity=1, layer="below"
-            )
-        )
-        
-        # Add the red indicator box
-        box_size = 50
-        fig.add_shape(
-            type="rect",
-            x0=relative_x - (box_size/2), y0=(cropped_img.size[1] - relative_y) - (box_size/2),
-            x1=relative_x + (box_size/2), y1=(cropped_img.size[1] - relative_y) + (box_size/2),
-            line=dict(color="red", width=3),
-            fillcolor="rgba(0,0,0,0)", 
-        )
-
-        fig.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, visible=False, range=[0, cropped_img.size[0]]),
-            yaxis=dict(showgrid=False, zeroline=False, visible=False, range=[0, cropped_img.size[1]], scaleanchor="x", scaleratio=1),
-            margin=dict(l=0, r=0, t=0, b=0),
-            plot_bgcolor="white",
-            height=600 
-        )
-        
-        return fig
-    except Exception as e:
-        print(f"Error building site map: {e}")
-        return None
