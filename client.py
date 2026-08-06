@@ -25,6 +25,8 @@ app_sidebar = ui.sidebar(
 # Using page_sidebar allows us to place the global header ABOVE the tabs,
 # perfectly mirroring the Streamlit layout from your image.
 app_ui = ui.page_sidebar(
+    app_sidebar,  # <--- MUST BE THE FIRST ARGUMENT (No 'sidebar=' keyword needed)
+    
     ui.output_ui("dynamic_global_header"),
     
     ui.navset_card_underline(
@@ -39,7 +41,6 @@ app_ui = ui.page_sidebar(
         id="main_tabs"
     ),
     
-    sidebar=app_sidebar,
     title="SoilFreeze Client Portal",
     fillable=True
 )
