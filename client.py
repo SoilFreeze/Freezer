@@ -1,6 +1,7 @@
 from shiny import App, render, reactive, ui
 import pandas as pd
 import os
+import html # <--- NEW: Used to safely escape the HTML for the iframe
 
 # Import your decoupled backend logic
 from app.pages.summary import get_summary_data
@@ -8,10 +9,6 @@ from app.pages.depth import generate_depth_figures
 from app.data.processor import get_universal_portal_data, get_bq_client
 from app.components.charts import build_high_speed_graph
 
-try:
-    from shinywidgets import output_widget, render_plotly
-except ImportError:
-    pass
 
 # ===============================================================
 # 1. SHINY UI DEFINITION
@@ -22,10 +19,8 @@ app_sidebar = ui.sidebar(
     ui.p("Enter your assigned Job Number to view project telemetry.", style="font-size: 0.9em; color: gray;")
 )
 
-# Using page_sidebar allows us to place the global header ABOVE the tabs,
-# perfectly mirroring the Streamlit layout from your image.
 app_ui = ui.page_sidebar(
-    app_sidebar,  # <--- MUST BE THE FIRST ARGUMENT (No 'sidebar=' keyword needed)
+    app_sidebar, 
     
     ui.output_ui("dynamic_global_header"),
     
@@ -42,7 +37,7 @@ app_ui = ui.page_sidebar(
     ),
     
     title="SoilFreeze Client Portal",
-    fillable=True
+    fillable=False  # <--- THE FIX: This stops the weird scrolling box behavior!
 )
 
 # ===============================================================
@@ -54,7 +49,7 @@ def server(input, output, session):
     def current_job():
         return input.job_number().strip()
 
-    # --- GLOBAL HEADER (Matches image_a73518.png) ---
+    # --- GLOBAL HEADER ---
     @render.ui
     def dynamic_global_header():
         job = current_job()
@@ -70,7 +65,6 @@ def server(input, output, session):
         proj_name = proj_row['ProjectName'] if pd.notnull(proj_row['ProjectName']) else job
         f_date = proj_row.get('Date_Freezedown')
         
-        # Calculate days of freezedown
         freeze_html = ""
         if pd.notnull(f_date) and str(f_date).strip() != "":
             try:
@@ -91,7 +85,6 @@ def server(input, output, session):
             except Exception:
                 pass
                 
-        # Calculate the official data status (Max Timestamp)
         latest_str = "Unknown"
         if tel_df is not None and not tel_df.empty:
             max_ts = tel_df['latest_ts'].max()
@@ -214,13 +207,16 @@ def server(input, output, session):
             )
             
             if fig:
-                # Bypass Shiny's widget registry entirely by rendering the Plotly figure directly to HTML
-                plot_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+                # 1. Generate full HTML document for Plotly
+                plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
+                # 2. Escape it securely
+                escaped_html = html.escape(plot_html)
+                # 3. Inject it inside a seamless iframe
+                iframe_tag = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
                 
                 ui_elements.append(
                     ui.card(
-                        ui.HTML(plot_html),
-                        full_screen=True,
+                        ui.HTML(iframe_tag),
                         style="margin-bottom: 20px;"
                     )
                 )
@@ -250,14 +246,15 @@ def server(input, output, session):
             
         ui_elements = []
         for loc, fig in figures_dict.items():
-            # Bypass Shiny's widget registry entirely by rendering the Plotly figure directly to HTML
-            plot_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+            
+            plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
+            escaped_html = html.escape(plot_html)
+            iframe_tag = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
             
             ui_elements.append(
                 ui.card(
                     ui.card_header(f"📍 Temp vs {chart_label} - {loc}"),
-                    ui.HTML(plot_html),
-                    full_screen=True,
+                    ui.HTML(iframe_tag),
                     style="margin-bottom: 20px;"
                 )
             )
