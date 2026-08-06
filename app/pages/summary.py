@@ -1,9 +1,15 @@
 import pandas as pd
+import sys
 
 # --- SAFE FRAMEWORK DETECTION ---
 try:
     import streamlit as st
-    HAS_STREAMLIT = True
+    # Smart detection: If Shiny is running the app, it will be in sys.modules.
+    # This prevents Shiny from trying to read Streamlit session states or secrets.
+    if 'shiny' in sys.modules:
+        HAS_STREAMLIT = False
+    else:
+        HAS_STREAMLIT = True
 except ImportError:
     HAS_STREAMLIT = False
 
@@ -16,8 +22,11 @@ def get_summary_data(selected_project, show_archived_opt=None):
     Pure Python function to retrieve all summary data matrices.
     Returns: (active_projs_df, pool_df, tel_df, error_msg)
     """
-    show_archived = show_archived_opt
-    if show_archived is None and HAS_STREAMLIT:
+    # Safe fallback: rely on the passed argument first, default to False
+    show_archived = False
+    if show_archived_opt is not None:
+        show_archived = show_archived_opt
+    elif HAS_STREAMLIT:
         show_archived = st.session_state.get('global_show_archived', False)
         
     client = get_bq_client()
