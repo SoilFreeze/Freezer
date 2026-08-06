@@ -29,6 +29,9 @@ def safe_cache_resource():
 
 @safe_cache_resource()
 def get_bq_client():
+    from google.oauth2 import service_account
+    from google.cloud import bigquery
+    
     SCOPES = [
         "https://www.googleapis.com/auth/bigquery",
         "https://www.googleapis.com/auth/drive",
@@ -36,7 +39,7 @@ def get_bq_client():
     ]
     
     try:
-        # If running in Streamlit, use st.secrets
+        # 1. If running in Streamlit, use st.secrets
         if HAS_STREAMLIT and "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
             credentials = service_account.Credentials.from_service_account_info(
@@ -44,22 +47,36 @@ def get_bq_client():
             ).with_scopes(SCOPES)
             return bigquery.Client(credentials=credentials, project=info["project_id"])
             
-        # If running in Shiny (or locally), fall back to environment variables
-        # Google's library automatically looks for GOOGLE_APPLICATION_CREDENTIALS in the environment
+        # 2. If running in Shiny, grab the JSON string from Environment Variables
         else:
             import os
-            # If deploying to Posit Connect, ensure GOOGLE_APPLICATION_CREDENTIALS points to a valid JSON key
-            if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-                return bigquery.Client()
-            return None
+            import json
             
+            gcp_json_str = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+            
+            if not gcp_json_str:
+                print("❌ BQ Auth: 'GCP_SERVICE_ACCOUNT_JSON' environment variable is missing!")
+                return None
+                
+            try:
+                info = json.loads(gcp_json_str)
+                credentials = service_account.Credentials.from_service_account_info(
+                    info
+                ).with_scopes(SCOPES)
+                print("✅ BQ Auth: Successfully authenticated via Environment Variable.")
+                return bigquery.Client(credentials=credentials, project=info["project_id"])
+                
+            except json.JSONDecodeError as e:
+                print(f"❌ BQ Auth: The environment variable is not valid JSON. Error: {e}")
+                return None
+                
     except Exception as e:
         if HAS_STREAMLIT:
             st.error(f"❌ BigQuery Authentication Failed: {e}")
         else:
             print(f"❌ BigQuery Authentication Failed: {e}")
         return None
-
+        
 @safe_cache(ttl=600)
 def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=False, show_masked=False, show_baddata=False):
     client = get_bq_client()
