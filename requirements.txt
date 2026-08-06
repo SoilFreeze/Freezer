@@ -18,3 +18,5 @@ pyarrow
 google-cloud-bigquery-storage
 matplotlib
 Pillow
+streamlit>=1.30.0
+streamlit-image-coordinates
