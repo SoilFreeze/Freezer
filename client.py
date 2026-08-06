@@ -299,4 +299,9 @@ def server(input, output, session):
             
         return ui.TagList(*image_elements)
 
-app = App(app_ui, server)
+# Mount the local "as_builts" directory to the "/as_builts" web path so the browser can see the images
+app = App(
+    app_ui, 
+    server, 
+    static_assets={"/as_builts": os.path.join(os.path.dirname(__file__), "as_builts")}
+)
