@@ -1,132 +1,194 @@
-from shiny import App, ui, reactive, render
-from shinywidgets import output_widget, render_plotly
-import pandas as pd
-import urllib.parse
+from shiny import App, render, reactive, ui
+import os
 
-# Import your existing heavy lifters!
-from app.data.processor import get_universal_portal_data, get_bq_client
-from app.components.charts import build_high_speed_graph
+# Import your decoupled backend logic
+from app.pages.summary import get_summary_data
+from app.pages.depth import generate_depth_figures
+
+# We will use Plotly for rendering the charts Shiny returns
+try:
+    from shinywidgets import output_widget, render_plotly
+except ImportError:
+    pass # Let the server catch this if shinywidgets is missing
 
 # ===============================================================
-# 1. THE UI (The layout blueprint)
+# 1. SHINY UI DEFINITION
 # ===============================================================
+
+# Define the sidebar for Job Number input
+app_sidebar = ui.sidebar(
+    ui.h4("Configuration"),
+    ui.input_text("job_number", "Job Number:", placeholder="e.g., 2527"),
+    ui.p("Enter your assigned Job Number to view project telemetry.", style="font-size: 0.9em; color: gray;")
+)
+
+# Define the main navigation pages
 app_ui = ui.page_navbar(
-    
-    pp_ui = ui.page_navbar(
     ui.nav_panel(
         "🏠 Summary", 
-        ui.h2("Project Summary"),
+        ui.output_ui("dynamic_summary_header"),
         ui.output_ui("dynamic_summary_cards")
     ),
-    title="SoilFreeze Client Portal",
-    id="main_nav"
-),
-    
-    # TAB 2: Timeline 
     ui.nav_panel(
-        "📈 Timeline Analysis", 
-        ui.layout_sidebar(
-            ui.sidebar(
-                ui.input_text("job_number", "Job Number (e.g., 2527):", value="2527"),
-                ui.input_select("phase_filter", "📂 Select Phase:", choices=["Loading..."]),
-                ui.input_selectize("system_filter", "⚙️ Filter by System:", choices=[], multiple=True)
-            ),
-            output_widget("timeline_chart") 
-        )
+        "📏 Profile Analysis", 
+        ui.h2("Depth Profile Analysis"),
+        ui.output_ui("dynamic_depth_charts")
     ),
-    
-    # TAB 3: As-Builts 
     ui.nav_panel(
-        "🗺️ As Built", 
+        "🗺️ As Built",
         ui.h2("Site As-Builts"),
-        ui.output_ui("as_built_images")
+        ui.output_ui("dynamic_as_builts")
     ),
-    
-    # KEYWORD ARGUMENTS
     title="SoilFreeze Client Portal",
-    id="main_nav"
+    id="main_nav",
+    sidebar=app_sidebar,
+    fillable=True
 )
 
 # ===============================================================
-# 2. THE SERVER (The reactive brain)
+# 2. SHINY SERVER LOGIC
 # ===============================================================
 def server(input, output, session):
     
-       
-    # @reactive.calc is Shiny's version of caching. 
-    # It only fetches from BigQuery when the job_number actually changes!
-    @reactive.calc
-    def master_data():
-        job = input.job_number()
+    # --- Reactive state to track the current job number ---
+    @reactive.Calc
+    def current_job():
+        return input.job_number().strip()
+
+    # --- TAB 1: SUMMARY ENGINE ---
+    @render.ui
+    def dynamic_summary_header():
+        job = current_job()
         if not job:
-            return pd.DataFrame()
-            
-        # Call your existing function!
-        df = get_universal_portal_data(job)
-        return df
+            return ui.h2("🌐 Global Active Project Summary")
+        return ui.h2(f"📊 Project Summary: {job}")
 
-    # This updates the dropdown choices automatically when new data arrives
-    @reactive.effect
-    def update_filters():
-        df = master_data()
-        if not df.empty:
-            phases = ["All Phases"] + sorted([str(p) for p in df['Phase'].dropna().unique() if str(p).strip().upper() not in ['NAN', 'NONE', '']])
-            systems = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']])
+    @render.ui
+    def dynamic_summary_cards():
+        job = current_job()
+        if not job:
+            return ui.p("Please provide a job number to view the summary.", style="color: gray; font-style: italic;")
             
-            ui.update_select("phase_filter", choices=phases)
-            ui.update_selectize("system_filter", choices=systems)
+        # Call the decoupled python function
+        active_projs, pool_df, tel_df, err = get_summary_data(selected_project=job, show_archived_opt=False)
+        
+        if err:
+            return ui.div(f"Error loading summary: {err}", style="color: red;")
+        if tel_df is None or tel_df.empty:
+            return ui.div(f"No recent telemetry found for job: {job} in the last 48 hours.", style="color: orange;")
+            
+        # Classify the data
+        is_amb_col = tel_df['Location'].astype(str).str.upper() == 'AMBIENT'
+        is_tp_col = tel_df['Depth'].notnull() & (tel_df['Depth'].astype(str).str.strip() != '') & ~is_amb_col
+        is_s_col = (tel_df['Bank'].astype(str).str.startswith('S') | tel_df['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
+        is_r_col = (tel_df['Bank'].astype(str).str.startswith('R') | tel_df['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
+        
+        groups = [
+            ("📥 Supply", tel_df[is_s_col], "blue"), 
+            ("📤 Return", tel_df[is_r_col], "orange"), 
+            ("📏 TempPipes", tel_df[is_tp_col], "green"),
+            ("☁️ Ambient", tel_df[is_amb_col], "gray")
+        ]
+        
+        cards = []
+        for title, g_df, color in groups:
+            if g_df.empty or g_df['latest_temp'].isnull().all():
+                continue
+                
+            latest_val = g_df['latest_temp'].mean()
+            # Construct a simple card UI
+            card = ui.div(
+                ui.h4(title, style="margin-bottom: 5px;"),
+                ui.h2(f"{latest_val:.1f} °F", style=f"color: {color}; margin-top: 0;"),
+                style="border: 1px solid #ddd; padding: 15px; border-radius: 8px; text-align: center; background-color: #f9f9f9;"
+            )
+            cards.append(card)
+            
+        if not cards:
+            return ui.p("Insufficient data to render summary cards.")
+            
+        return ui.layout_column_wrap(*cards, width=1/4)
 
-    # Another @reactive.calc to apply the filters quickly without re-querying BigQuery
-    @reactive.calc
-    def filtered_data():
-        df = master_data()
-        if df.empty:
-            return df
+    # --- TAB 2: DEPTH PROFILE ENGINE ---
+    @render.ui
+    def dynamic_depth_charts():
+        job = current_job()
+        if not job:
+            return ui.p("Please provide a job number to view profiles.", style="color: gray; font-style: italic;")
             
-        phase = input.phase_filter()
-        systems = input.system_filter()
-        
-        if phase and phase != "All Phases":
-            df = df[df['Phase'].astype(str) == phase]
-        if systems:
-            df = df[df['System'].astype(str).isin(systems)]
-            
-        return df
-
-    # --- PLOTLY CHART RENDERING ---
-    # @render_plotly connects to the output_widget("timeline_chart") in the UI
-    @render_plotly
-    def timeline_chart():
-        df = filtered_data()
-        if df.empty:
-            return None
-            
-        # We'll just grab the first valid location for this example
-        locations = [loc for loc in df['Location'].dropna().unique() if 'AMBIENT' not in str(loc).upper()]
-        if not locations:
-            return None
-            
-        target_loc = locations[0]
-        loc_data = df[df['Location'] == target_loc]
-        
-        bq_client = get_bq_client()
-        
-        # Call your EXACT same chart builder!
-        fig = build_high_speed_graph(
-            client=bq_client,
-            df=loc_data,
-            title=f"Thermal Trends: {target_loc}",
-            start_view=df['timestamp'].min(),
-            end_view=df['timestamp'].max(),
-            active_refs=[(32.0, "Freezing")],
-            unit_mode="Fahrenheit",
-            unit_label="°F",
-            display_tz="US/Pacific",
-            curve_id=f"{input.job_number()}-{target_loc}"
+        figures_dict, chart_label, error_msg = generate_depth_figures(
+            selected_project=job, 
+            unit_label="°F", 
+            display_tz="US/Pacific", 
+            orientation="vertical",
+            lookback_weeks=5,
+            show_masked=False,
+            show_baddata=False,
+            unit_mode="Fahrenheit"
         )
-        return fig
+        
+        if error_msg:
+            return ui.div(error_msg, style="color: orange;")
+            
+        ui_elements = []
+        for loc, fig in figures_dict.items():
+            widget_id = f"depth_chart_{loc}"
+            
+            # Wrap the widget in a card structure
+            ui_elements.append(
+                ui.card(
+                    ui.card_header(f"📍 Temp vs {chart_label} - {loc}"),
+                    output_widget(widget_id),
+                    full_screen=True
+                )
+            )
+            
+            # Register the render function dynamically
+            def make_render_func(plot_fig):
+                @render_plotly
+                def _render_chart():
+                    return plot_fig
+                return _render_chart
+                
+            session.output.register(widget_id, make_render_func(fig))
+            
+        return ui.TagList(*ui_elements)
 
-# ===============================================================
-# 3. APP LAUNCHER
-# ===============================================================
+    # --- TAB 3: AS BUILTS ENGINE ---
+    @render.ui
+    def dynamic_as_builts():
+        job = current_job()
+        if not job:
+            return ui.p("Please provide a job number to view as-builts.", style="color: gray; font-style: italic;")
+            
+        job_root = str(job).split('-')[0].strip()
+        as_builts_dir = "as_builts"
+        
+        if not os.path.exists(as_builts_dir):
+            return ui.div("As-builts directory not found.", style="color: orange;")
+            
+        found_images = sorted([
+            f for f in os.listdir(as_builts_dir) 
+            if f.startswith(job_root) and f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        
+        if not found_images:
+            return ui.div("ℹ️ Site plan is currently being processed or has not been assigned.", style="color: gray; font-style: italic;")
+            
+        image_elements = []
+        for img_name in found_images:
+            img_path = os.path.join(as_builts_dir, img_name)
+            # In Shiny, local images must be served via a web directory or handled specifically.
+            # For simplicity, if the image is within the app directory, we can wrap it in an img tag if it's in a 'www' folder.
+            # *NOTE: For Posit Connect Cloud, we assume the 'as_builts' folder is accessible to the app logic.*
+            image_elements.append(
+                ui.div(
+                    ui.h5(img_name),
+                    ui.p(f"[Image Data: {img_path}] - Note: Static file serving requires 'www' directory configuration in Shiny."),
+                    style="border: 1px solid #ddd; padding: 10px; margin-bottom: 10px;"
+                )
+            )
+            
+        return ui.TagList(*image_elements)
+
 app = App(app_ui, server)
