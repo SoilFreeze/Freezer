@@ -69,11 +69,14 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
                 parsed_f_date = parsed_f_date.tz_localize('UTC')
             
             days_since_freeze = (now_utc - parsed_f_date).days
-            if days_since_freeze > fetch_days:
-                # Pull data back to a few days BEFORE freezedown to guarantee baseline capture
-                fetch_days = days_since_freeze + 5
+            if days_since_freeze > 0:
+                # Pull data back to the start of freezedown + 5 days buffer to guarantee we catch the first readings
+                fetch_days = max(fetch_days, days_since_freeze + 5)
         except Exception:
             pass
+    else:
+        # Fallback if no date is found to ensure we get a baseline
+        fetch_days = max(fetch_days, 180)
 
     # 2. Fetch Data
     try:
@@ -139,37 +142,22 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
         fig = go.Figure()
 
         # A. BASELINE
+        # Because we dynamically extended fetch_days, loc_data contains the entire history.
+        # The absolute minimum timestamp is the true install/baseline time for this specific pipe.
+        baseline_ts = loc_data['timestamp_local'].min()
+        
+        b_window = loc_data[
+            (loc_data['timestamp_local'] >= baseline_ts) & 
+            (loc_data['timestamp_local'] <= baseline_ts + pd.Timedelta(hours=24))
+        ]
+        
         baseline_date_str = ""
         snap_base = pd.DataFrame()
         
-        anchor_ts = None
-        if pd.notnull(real_f_date) and str(real_f_date).strip() != "":
-            try:
-                anchor_ts = pd.to_datetime(real_f_date)
-                if anchor_ts.tzinfo is None:
-                    anchor_ts = anchor_ts.tz_localize('UTC')
-                anchor_ts = anchor_ts.tz_convert(display_tz)
-            except:
-                pass
-                
-        if anchor_ts is None:
-            anchor_ts = loc_data['timestamp_local'].min()
-            
-        b_window = loc_data[
-            (loc_data['timestamp_local'] >= anchor_ts - pd.Timedelta(hours=24)) & 
-            (loc_data['timestamp_local'] <= anchor_ts + pd.Timedelta(hours=48))
-        ]
-        
         if not b_window.empty:
-            post_anchor = b_window[b_window['timestamp_local'] >= anchor_ts]
-            if not post_anchor.empty:
-                true_baseline_ts = post_anchor['timestamp_local'].min()
-            else:
-                true_baseline_ts = b_window['timestamp_local'].min()
-                
-            baseline_date_str = true_baseline_ts.strftime('%Y-%m-%d')
+            baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
             snap_base = (
-                b_window.assign(diff=(b_window['timestamp_local'] - true_baseline_ts).abs())
+                b_window.assign(diff=(b_window['timestamp_local'] - baseline_ts).abs())
                 .sort_values(['NodeNum', 'diff'])
                 .drop_duplicates('NodeNum')
                 .sort_values('Depth_Num')
