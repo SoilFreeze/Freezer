@@ -548,7 +548,7 @@ def render_recovery_filters(sp_reg):
     loc_filtered = proj_filtered if rec_loc == "All" else proj_filtered[proj_filtered['Location'] == rec_loc]
     return c3.multiselect("Select Target Node Numbers", sorted(loc_filtered['NodeNum'].dropna().unique().tolist(), key=natural_sort_key), default=None, key="rec_nodes_multiselect_isolated")
 
-@st.cache_data(ttl=600)
+@safe_cache(ttl=600)
 def get_cached_registry():
     client = get_bq_client()
     if client is None: return pd.DataFrame(), []
@@ -561,7 +561,7 @@ def get_cached_registry():
     
     return full_reg_df, available_projects_list
 
-@st.cache_data(ttl=600)
+@safe_cache(ttl=600)
 def get_cached_fleet_matrix():
     client = get_bq_client()
     if client is None: return pd.DataFrame()
