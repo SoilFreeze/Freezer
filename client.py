@@ -265,21 +265,24 @@ def server(input, output, session):
                         </div>
                         """
                     else:
-                        # VISUAL DEBUGGER: If it fails to build the map, tell us why on the screen!
-                        content_html = f"""
-                        <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
-                            <div style="flex: 3; min-width: 600px;">
-                                {main_chart_iframe}
-                            </div>
-                            <div style="flex: 1; min-width: 250px; display: flex; align-items: center; justify-content: center; background-color: #f8d7da; color: #721c24; border-radius: 5px; padding: 20px; text-align: center;">
-                                <div>
-                                    <b>⚠️ Map Image Error</b><br><br>
-                                    Coordinates found for {loc_clean}, but image could not be loaded from:<br>
-                                    <small style="word-break: break-all;">{as_built_path}</small>
-                                </div>
+                    # VISUAL DEBUGGER 2: If it didn't find a map, tell us exactly what BigQuery returned!
+                    bq_locs = df_all_locs['Location'].tolist() if not df_all_locs.empty and 'Location' in df_all_locs.columns else "Empty or Failed Fetch"
+                    
+                    content_html = f"""
+                    <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
+                        <div style="flex: 3; min-width: 600px;">
+                            {main_chart_iframe}
+                        </div>
+                        <div style="flex: 1; min-width: 250px; display: flex; align-items: center; justify-content: center; background-color: #cce5ff; color: #004085; border-radius: 5px; padding: 20px; text-align: center;">
+                            <div>
+                                <b>ℹ️ Matching Debugger</b><br><br>
+                                Chart is looking for: <b>{loc_clean}</b><br><br>
+                                BigQuery found these locations for {job_root}:<br>
+                                <small style="word-break: break-all;">{bq_locs}</small>
                             </div>
                         </div>
-                        """
+                    </div>
+                    """
                 
                 ui_elements.append(
                     ui.card(
