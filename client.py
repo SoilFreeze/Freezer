@@ -247,13 +247,15 @@ def server(input, output, session):
                 if has_map:
                     map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
                     
+                    if has_map:
+                    map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
+                    
                     if map_fig:
                         map_html = map_fig.to_html(full_html=True, include_plotlyjs="cdn")
                         escaped_map_html = html.escape(map_html)
                         map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
                         
                         # --- BULLETPROOF RAW CSS FLEXBOX ---
-                        # 75% width for the chart, 25% for the map. Will wrap cleanly on mobile screens.
                         content_html = f"""
                         <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
                             <div style="flex: 3; min-width: 600px;">
@@ -265,7 +267,23 @@ def server(input, output, session):
                         </div>
                         """
                     else:
-                    # VISUAL DEBUGGER 2: If it didn't find a map, tell us exactly what BigQuery returned!
+                        # VISUAL DEBUGGER: If it fails to build the map
+                        content_html = f"""
+                        <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
+                            <div style="flex: 3; min-width: 600px;">
+                                {main_chart_iframe}
+                            </div>
+                            <div style="flex: 1; min-width: 250px; display: flex; align-items: center; justify-content: center; background-color: #f8d7da; color: #721c24; border-radius: 5px; padding: 20px; text-align: center;">
+                                <div>
+                                    <b>⚠️ Map Image Error</b><br><br>
+                                    Coordinates found for {loc_clean}, but image could not be loaded from:<br>
+                                    <small style="word-break: break-all;">{as_built_path}</small>
+                                </div>
+                            </div>
+                        </div>
+                        """
+                else:
+                    # VISUAL DEBUGGER 2: If it didn't find a map in BigQuery
                     bq_locs = df_all_locs['Location'].tolist() if not df_all_locs.empty and 'Location' in df_all_locs.columns else "Empty or Failed Fetch"
                     
                     content_html = f"""
