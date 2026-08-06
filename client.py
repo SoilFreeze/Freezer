@@ -5,6 +5,8 @@ import os
 # Import your decoupled backend logic
 from app.pages.summary import get_summary_data
 from app.pages.depth import generate_depth_figures
+from app.data.processor import get_universal_portal_data, get_bq_client
+from app.components.charts import build_high_speed_graph
 
 try:
     from shinywidgets import output_widget, render_plotly
@@ -20,25 +22,25 @@ app_sidebar = ui.sidebar(
     ui.p("Enter your assigned Job Number to view project telemetry.", style="font-size: 0.9em; color: gray;")
 )
 
-app_ui = ui.page_navbar(
-    ui.nav_panel(
-        "🏠 Summary", 
-        ui.output_ui("dynamic_summary_header"),
-        ui.output_ui("dynamic_summary_cards")
+# Using page_sidebar allows us to place the global header ABOVE the tabs,
+# perfectly mirroring the Streamlit layout from your image.
+app_ui = ui.page_sidebar(
+    ui.output_ui("dynamic_global_header"),
+    
+    ui.navset_card_underline(
+        ui.nav_panel(
+            "🏠 Summary", 
+            ui.h3("🌐 24 hour Thermal Summary", style="margin-top: 10px; margin-bottom: 25px; color: #2c3e50; font-weight: 500;"),
+            ui.output_ui("dynamic_summary_cards")
+        ),
+        ui.nav_panel("📈 Timeline Analysis", ui.output_ui("dynamic_timeline_charts")),
+        ui.nav_panel("📏 Depth Profile", ui.output_ui("dynamic_depth_charts")),
+        ui.nav_panel("🗺️ As Built", ui.output_ui("dynamic_as_builts")),
+        id="main_tabs"
     ),
-    ui.nav_panel(
-        "📏 Profile Analysis", 
-        ui.h2("Depth Profile Analysis"),
-        ui.output_ui("dynamic_depth_charts")
-    ),
-    ui.nav_panel(
-        "🗺️ As Built",
-        ui.h2("Site As-Builts"),
-        ui.output_ui("dynamic_as_builts")
-    ),
-    title="SoilFreeze Client Portal",
-    id="main_nav",
+    
     sidebar=app_sidebar,
+    title="SoilFreeze Client Portal",
     fillable=True
 )
 
@@ -51,14 +53,13 @@ def server(input, output, session):
     def current_job():
         return input.job_number().strip()
 
-    # --- TAB 1: SUMMARY ENGINE ---
+    # --- GLOBAL HEADER (Matches image_a73518.png) ---
     @render.ui
-    def dynamic_summary_header():
+    def dynamic_global_header():
         job = current_job()
         if not job:
             return ui.h2("🌐 Global Active Project Summary")
             
-        # Pull data dynamically
         active_projs, _, tel_df, err = get_summary_data(selected_project=job, show_archived_opt=False)
         
         if err or active_projs is None or active_projs.empty:
@@ -68,7 +69,7 @@ def server(input, output, session):
         proj_name = proj_row['ProjectName'] if pd.notnull(proj_row['ProjectName']) else job
         f_date = proj_row.get('Date_Freezedown')
         
-        # 1. Calculate days of freezedown for the sub-header
+        # Calculate days of freezedown
         freeze_html = ""
         if pd.notnull(f_date) and str(f_date).strip() != "":
             try:
@@ -89,17 +90,15 @@ def server(input, output, session):
             except Exception:
                 pass
                 
-        # 2. Calculate the official data status (Max Timestamp) for the banner
+        # Calculate the official data status (Max Timestamp)
         latest_str = "Unknown"
         if tel_df is not None and not tel_df.empty:
             max_ts = tel_df['latest_ts'].max()
             if pd.notnull(max_ts):
-                # Convert to US/Pacific matching the internal UI format
                 if max_ts.tzinfo is None:
                     max_ts = max_ts.tz_localize('UTC')
                 latest_str = max_ts.tz_convert('US/Pacific').strftime('%B %d, %Y at %I:%M %p')
         
-        # Combine everything into the header HTML block
         return ui.HTML(f"""
             <h1 style="display: flex; align-items: center; gap: 10px; color: #343a40; font-weight: 700; font-size: 2.8rem; margin-bottom: 25px;">
                 📊 {proj_name}
@@ -112,9 +111,9 @@ def server(input, output, session):
             
             {freeze_html}
             <hr style="margin-top: 15px; margin-bottom: 25px; border-top: 1px solid #dee2e6;">
-            <h3 style="margin-bottom: 25px; color: #2c3e50; font-weight: 500;">🌐 24 hour Thermal Summary</h3>
         """)
 
+    # --- TAB 1: SUMMARY ENGINE ---
     @render.ui
     def dynamic_summary_cards():
         job = current_job()
@@ -128,7 +127,6 @@ def server(input, output, session):
         if tel_df is None or tel_df.empty:
             return ui.div(f"No recent telemetry found for job: {job} in the last 48 hours.", style="color: orange;")
             
-        # Classify the data based on your specific location rules
         is_amb_col = tel_df['Location'].astype(str).str.upper() == 'AMBIENT'
         is_tp_col = tel_df['Depth'].notnull() & (tel_df['Depth'].astype(str).str.strip() != '') & ~is_amb_col
         is_s_col = (tel_df['Bank'].astype(str).str.startswith('S') | tel_df['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
@@ -156,12 +154,10 @@ def server(input, output, session):
             high_24 = g_df['max_24h'].max()
             low_24 = g_df['min_24h'].min()
             
-            # Format numbers safely
             l_str = f"{latest_val:.1f}°F" if pd.notnull(latest_val) else "N/A"
             h_str = f"{high_24:.1f}°F" if pd.notnull(high_24) else "N/A"
             lo_str = f"{low_24:.1f}°F" if pd.notnull(low_24) else "N/A"
             
-            # Construct the clean, borderless HTML card matching the screenshot
             card_html = f"""
             <div style="font-family: sans-serif;">
                 <h3 style="margin-bottom: 20px; color: #343a40; font-weight: 500;">{title}</h3>
@@ -175,10 +171,70 @@ def server(input, output, session):
             """
             cols.append(ui.HTML(card_html))
             
-        # Render the HTML cards in a 4-column wrap
         return ui.layout_column_wrap(*cols, width=1/4, gap="30px")
 
-    # --- TAB 2: DEPTH PROFILE ENGINE ---
+    # --- TAB 2: TIMELINE ANALYSIS ENGINE ---
+    @render.ui
+    def dynamic_timeline_charts():
+        job = current_job()
+        if not job:
+            return ui.p("Please provide a job number.", style="color: gray; font-style: italic;")
+            
+        df = get_universal_portal_data(job, lookback_days=42, is_summary_page=False, show_masked=False, show_baddata=False)
+        if df is None or df.empty:
+            return ui.p("No timeline data found for this project.", style="color: orange;")
+            
+        client = get_bq_client()
+        unique_locations = [loc for loc in df['Location'].dropna().unique() if 'AMBIENT' not in str(loc).upper() and str(loc).strip().upper() != 'UNASSIGNED']
+        
+        if not unique_locations:
+            return ui.p("No assigned locations available to chart.", style="color: gray;")
+            
+        start_date = df['timestamp'].min()
+        end_date = df['timestamp'].max()
+        
+        ui_elements = []
+        for loc in sorted(unique_locations):
+            loc_data = df[df['Location'] == loc]
+            if loc_data.empty: continue
+            
+            fig = build_high_speed_graph(
+                client=client,  
+                df=loc_data, 
+                title=f"Thermal Trends: {loc}",
+                start_view=start_date, 
+                end_view=end_date, 
+                active_refs=[(32.0, "Freezing")],
+                unit_mode="Fahrenheit",
+                unit_label="°F",
+                display_tz="US/Pacific",
+                curve_id=f"{job}-{loc}",
+                show_elevation=False
+            )
+            
+            if fig:
+                # Use a unique widget ID incorporating the job number to prevent re-render collisions
+                widget_id = f"timeline_chart_{job}_{loc}" 
+                ui_elements.append(
+                    ui.card(
+                        output_widget(widget_id),
+                        full_screen=True,
+                        style="margin-bottom: 20px;"
+                    )
+                )
+                
+                # Dynamic rendering factory function required for Shiny loops
+                def make_render_func(plot_fig):
+                    @render_plotly
+                    def _render_chart():
+                        return plot_fig
+                    return _render_chart
+                    
+                session.output.register(widget_id, make_render_func(fig))
+                
+        return ui.TagList(*ui_elements)
+
+    # --- TAB 3: DEPTH PROFILE ENGINE ---
     @render.ui
     def dynamic_depth_charts():
         job = current_job()
@@ -201,13 +257,14 @@ def server(input, output, session):
             
         ui_elements = []
         for loc, fig in figures_dict.items():
-            widget_id = f"depth_chart_{loc}"
+            widget_id = f"depth_chart_{job}_{loc}"
             
             ui_elements.append(
                 ui.card(
                     ui.card_header(f"📍 Temp vs {chart_label} - {loc}"),
                     output_widget(widget_id),
-                    full_screen=True
+                    full_screen=True,
+                    style="margin-bottom: 20px;"
                 )
             )
             
@@ -221,7 +278,7 @@ def server(input, output, session):
             
         return ui.TagList(*ui_elements)
 
-    # --- TAB 3: AS BUILTS ENGINE ---
+    # --- TAB 4: AS BUILTS ENGINE ---
     @render.ui
     def dynamic_as_builts():
         job = current_job()
