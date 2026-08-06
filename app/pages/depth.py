@@ -2,7 +2,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import re
 import sys
-from app.data.processor import get_universal_portal_data
+from app.data.processor import get_universal_portal_data, get_bq_client
+from app.utils.config import PROJECT_REGISTRY_TABLE
 from app.pages.admin import natural_sort_key
 
 # --- SAFE FRAMEWORK DETECTION ---
@@ -41,19 +42,38 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
     if not selected_project or selected_project == "All Projects":
         return {}, chart_type_label, "Please select a specific project to view profiles."
 
-    # 1. Calculate fetch days
-    real_f_date = get_ui_state('project_metadata', None, {}).get('Date_Freezedown')
+    # 1. Fetch Project Metadata safely (fixes Shiny not having session state)
+    real_f_date = None
+    if HAS_STREAMLIT:
+        real_f_date = get_ui_state('project_metadata', None, {}).get('Date_Freezedown')
+        
+    if not real_f_date or pd.isnull(real_f_date):
+        try:
+            client = get_bq_client()
+            if client:
+                job_root = str(selected_project).split('-')[0].strip()
+                q = f"SELECT Date_Freezedown FROM `{PROJECT_REGISTRY_TABLE}` WHERE Project LIKE '{job_root}%' LIMIT 1"
+                res = client.query(q).to_dataframe()
+                if not res.empty:
+                    real_f_date = res.iloc[0]['Date_Freezedown']
+        except Exception:
+            pass
+
     now_utc = pd.Timestamp.now(tz='UTC')
     fetch_days = _lookback_weeks * 7 
     
-    if pd.notnull(real_f_date):
-        parsed_f_date = pd.to_datetime(real_f_date)
-        if parsed_f_date.tzinfo is None:
-            parsed_f_date = parsed_f_date.tz_localize('UTC')
-        
-        days_since_freeze = (now_utc - parsed_f_date).days
-        if days_since_freeze > fetch_days:
-            fetch_days = days_since_freeze + 2
+    if pd.notnull(real_f_date) and str(real_f_date).strip() != "":
+        try:
+            parsed_f_date = pd.to_datetime(real_f_date)
+            if parsed_f_date.tzinfo is None:
+                parsed_f_date = parsed_f_date.tz_localize('UTC')
+            
+            days_since_freeze = (now_utc - parsed_f_date).days
+            if days_since_freeze > fetch_days:
+                # Pull data back to a few days BEFORE freezedown to guarantee baseline capture
+                fetch_days = days_since_freeze + 5
+        except Exception:
+            pass
 
     # 2. Fetch Data
     try:
@@ -119,18 +139,37 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
         fig = go.Figure()
 
         # A. BASELINE
-        baseline_ts = loc_data['timestamp_local'].min()
-        b_window = loc_data[
-            (loc_data['timestamp_local'] >= baseline_ts - pd.Timedelta(hours=12)) & 
-            (loc_data['timestamp_local'] <= baseline_ts + pd.Timedelta(hours=12))
-        ]
-        
         baseline_date_str = ""
         snap_base = pd.DataFrame()
+        
+        anchor_ts = None
+        if pd.notnull(real_f_date) and str(real_f_date).strip() != "":
+            try:
+                anchor_ts = pd.to_datetime(real_f_date)
+                if anchor_ts.tzinfo is None:
+                    anchor_ts = anchor_ts.tz_localize('UTC')
+                anchor_ts = anchor_ts.tz_convert(display_tz)
+            except:
+                pass
+                
+        if anchor_ts is None:
+            anchor_ts = loc_data['timestamp_local'].min()
+            
+        b_window = loc_data[
+            (loc_data['timestamp_local'] >= anchor_ts - pd.Timedelta(hours=24)) & 
+            (loc_data['timestamp_local'] <= anchor_ts + pd.Timedelta(hours=48))
+        ]
+        
         if not b_window.empty:
-            baseline_date_str = baseline_ts.strftime('%Y-%m-%d')
+            post_anchor = b_window[b_window['timestamp_local'] >= anchor_ts]
+            if not post_anchor.empty:
+                true_baseline_ts = post_anchor['timestamp_local'].min()
+            else:
+                true_baseline_ts = b_window['timestamp_local'].min()
+                
+            baseline_date_str = true_baseline_ts.strftime('%Y-%m-%d')
             snap_base = (
-                b_window.assign(diff=(b_window['timestamp_local'] - baseline_ts).abs())
+                b_window.assign(diff=(b_window['timestamp_local'] - true_baseline_ts).abs())
                 .sort_values(['NodeNum', 'diff'])
                 .drop_duplicates('NodeNum')
                 .sort_values('Depth_Num')
@@ -168,7 +207,6 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
         snap_recent = pd.DataFrame(recent_profile_rows).sort_values('Depth_Num') if recent_profile_rows else pd.DataFrame()
 
         # C. HISTORICAL
-        # --- NEW: Explicit color cycle to replace Streamlit's missing theme ---
         hist_colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52']
         c_idx = 0
         
@@ -199,18 +237,16 @@ def generate_depth_figures(selected_project, unit_label, display_tz, orientation
                 y_week = temps if is_horizontal else snap_week['Depth_Num']
                 ht_week = f"Date: {current_loop_date}<br>{chart_type_label}: %{{{'x' if is_horizontal else 'y'}}}ft<br>Temp: %{{{'y' if is_horizontal else 'x'}:.1f}}{unit_label}<extra></extra>"
 
-                # Grab a new color from the sequence for this specific week
                 h_color = hist_colors[c_idx % len(hist_colors)]
                 c_idx += 1
 
                 fig.add_trace(go.Scatter(
                     x=x_week, y=y_week, mode='lines+markers', name=current_loop_date,
-                    # --- NEW: Inject the explicit color into the line and marker dictionaries ---
                     line=dict(color=h_color, shape='spline', smoothing=1.1, width=1.5), 
                     marker=dict(color=h_color, size=4), 
                     hovertemplate=ht_week
                 ))
-                
+
         # D. RECENT LINE INJECTION
         if not snap_recent.empty:
             recent_temps = snap_recent['temperature']
