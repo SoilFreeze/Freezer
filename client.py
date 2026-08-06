@@ -189,13 +189,17 @@ def server(input, output, session):
         end_date = df['timestamp'].max()
         job_root = str(job).split('-')[0].strip()
         
-        # --- Fetch map data robustly ---
+        # --- Fetch map data robustly & Catch Exact Errors ---
         df_all_locs = pd.DataFrame()
+        fetch_error = "No errors detected during fetch."
+        
         try:
-            import app.utils.config as cfg
+            # Explicitly import the config credentials
+            from app.utils.config import PROJECT_ID, DATASET_ID
+            
             map_query = f"""
                 SELECT CAST(Project AS STRING) as Project, CAST(Location AS STRING) as Location, Map_X, Map_Y, Image_Name 
-                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.TempPipeLoc` 
+                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
                 WHERE CAST(Project AS STRING) = '{job_root}'
             """
             df_all_locs = client.query(map_query).to_dataframe()
@@ -204,7 +208,11 @@ def server(input, output, session):
                 # Force uppercase and strip spaces for bulletproof matching
                 df_all_locs['Location'] = df_all_locs['Location'].astype(str).str.strip().str.upper()
                 df_all_locs['Project'] = df_all_locs['Project'].astype(str).str.strip()
+            else:
+                fetch_error = f"Query succeeded but found 0 rows for project: {job_root}"
+                
         except Exception as e:
+            fetch_error = f"BigQuery Crash: {str(e)}"
             print(f"Warning: Map data fetch failed: {e}")
             
         # Guarantee absolute path to the as_builts folder for the cloud environment
@@ -280,20 +288,24 @@ def server(input, output, session):
                         </div>
                         """
                 else:
-                    # VISUAL DEBUGGER 2: If it didn't find a map in BigQuery
-                    bq_locs = df_all_locs['Location'].tolist() if not df_all_locs.empty and 'Location' in df_all_locs.columns else "Empty or Failed Fetch"
+                    # VISUAL DEBUGGER 2: Tells us exactly what BigQuery returned and any errors
+                    bq_locs = df_all_locs['Location'].tolist() if not df_all_locs.empty and 'Location' in df_all_locs.columns else "Empty DataFrame"
                     
                     content_html = f"""
                     <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
                         <div style="flex: 3; min-width: 600px;">
                             {main_chart_iframe}
                         </div>
-                        <div style="flex: 1; min-width: 250px; display: flex; align-items: center; justify-content: center; background-color: #cce5ff; color: #004085; border-radius: 5px; padding: 20px; text-align: center;">
+                        <div style="flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; background-color: #cce5ff; color: #004085; border-radius: 5px; padding: 20px; text-align: center;">
                             <div>
                                 <b>ℹ️ Matching Debugger</b><br><br>
                                 Chart is looking for: <b>{loc_clean}</b><br><br>
-                                BigQuery found these locations for {job_root}:<br>
-                                <small style="word-break: break-all;">{bq_locs}</small>
+                                BigQuery Locations found:<br>
+                                <small style="word-break: break-all;">{bq_locs}</small><br><br>
+                            </div>
+                            <div style="margin-top: 15px; border-top: 1px solid #b8daff; padding-top: 15px; width: 100%;">
+                                <b>Status / Error Message:</b><br>
+                                <small style="color: #dc3545;">{fetch_error}</small>
                             </div>
                         </div>
                     </div>
