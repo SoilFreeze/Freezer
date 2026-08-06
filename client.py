@@ -8,6 +8,7 @@ from app.pages.summary import get_summary_data
 from app.pages.depth import generate_depth_figures
 from app.data.processor import get_universal_portal_data, get_bq_client
 from app.components.charts import build_high_speed_graph
+from app.components.charts import build_cropped_site_map
 
 
 # ===============================================================
@@ -186,6 +187,23 @@ def server(input, output, session):
             
         start_date = df['timestamp'].min()
         end_date = df['timestamp'].max()
+        job_root = str(job).split('-')[0].strip()
+        
+        # --- Fetch map data and clean strings to guarantee a match ---
+        df_all_locs = pd.DataFrame()
+        try:
+            import app.utils.config as cfg
+            map_query = f"""
+                SELECT Project, Location, Map_X, Map_Y, Image_Name 
+                FROM `{cfg.PROJECT_ID}.{cfg.DATASET_ID}.TempPipeLoc` 
+                WHERE CAST(Project AS STRING) = '{job_root}'
+            """
+            df_all_locs = client.query(map_query).to_dataframe()
+            # Clean up whitespace so charts.py matches perfectly
+            if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                df_all_locs['Location'] = df_all_locs['Location'].astype(str).str.strip()
+        except Exception as e:
+            print(f"Warning: Map data fetch failed: {e}")
         
         ui_elements = []
         for loc in sorted(unique_locations):
@@ -207,16 +225,42 @@ def server(input, output, session):
             )
             
             if fig:
-                # 1. Generate full HTML document for Plotly
+                # 1. Prepare Main Chart
                 plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
-                # 2. Escape it securely
                 escaped_html = html.escape(plot_html)
-                # 3. Inject it inside a seamless iframe
-                iframe_tag = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
+                main_chart_iframe = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
+                
+                # 2. Check Map Eligibility
+                has_map = False
+                loc_clean = str(loc).strip()
+                if not df_all_locs.empty and 'Location' in df_all_locs.columns:
+                    has_map = loc_clean in df_all_locs['Location'].values
+                
+                if has_map:
+                    as_built_path = os.path.join(os.path.dirname(__file__), "as_builts")
+                    # Pass the cleaned string to ensure charts.py finds it
+                    map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
+                    
+                    if map_fig:
+                        map_html = map_fig.to_html(full_html=True, include_plotlyjs="cdn")
+                        escaped_map_html = html.escape(map_html)
+                        map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
+                        
+                        # --- THE FIX: Use layout_columns for uneven 75% / 25% split ---
+                        content = ui.layout_columns(
+                            ui.HTML(main_chart_iframe), 
+                            ui.HTML(map_iframe), 
+                            col_widths=(9, 3), # 9 cols for chart, 3 cols for map
+                            gap="10px"
+                        )
+                    else:
+                        content = ui.HTML(main_chart_iframe)
+                else:
+                    content = ui.HTML(main_chart_iframe)
                 
                 ui_elements.append(
                     ui.card(
-                        ui.HTML(iframe_tag),
+                        content,
                         style="margin-bottom: 20px;"
                     )
                 )
