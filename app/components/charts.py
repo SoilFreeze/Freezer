@@ -196,7 +196,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
             if HAS_STREAMLIT:
                 st.warning(f"⚠️ No elevation data in database for {title}.")
 
-    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and st.session_state.get('global_show_ref', True):
+    if curve_id and curve_id != "None" and f_start_date and is_temp_pipe and _show_ref:
         try:
             parts = str(curve_id).split('-')
             proj_num = parts[0].strip() if len(parts) > 0 else ""
@@ -346,7 +346,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         
         # 4. Draw the isolated warning markers using the original un-nullified temperature
         if 'approval_status' in s_df.columns:
-            if st.session_state.get('global_show_masked', False):
+            if _show_masked:
                 masked_df = s_df[s_status == 'MASKED']
                 if not masked_df.empty:
                     fig.add_trace(go.Scatter(
@@ -358,7 +358,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
                         showlegend=False
                     ))
             
-            if st.session_state.get('global_show_baddata', False):
+            if _show_baddata:
                 bad_df = s_df[s_status == 'BADDATA']
                 if not bad_df.empty:
                     fig.add_trace(go.Scatter(
@@ -373,14 +373,14 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         
     is_brine_graph = not is_temp_pipe
     
-    if st.session_state.get('global_show_ambient', True) and is_brine_graph:
+    if _show_ambient and is_brine_graph:
         p_name = ""
         if 'Project' in plot_df.columns and not plot_df.empty:
             p_name = str(plot_df['Project'].iloc[0])
         elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
             p_name = str(plot_df['Raw_Project_Name'].iloc[0])
         else:
-            p_name = st.session_state.get('selected_project', '')
+            p_name = _project_name
             
         job_num = p_name.split('-')[0].strip()
         
@@ -420,7 +420,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
     elif 'Raw_Project_Name' in plot_df.columns and not plot_df.empty:
         p_name = str(plot_df['Raw_Project_Name'].iloc[0])
     else:
-        p_name = st.session_state.get('selected_project', 'Unknown Project')
+        p_name = _project_name if _project_name else 'Unknown Project'
     
     clean_title = str(title).replace("Thermal Trends:", "").strip()
     
