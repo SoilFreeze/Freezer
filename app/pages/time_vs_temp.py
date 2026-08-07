@@ -1,4 +1,5 @@
 from shiny import ui, render, reactive, module
+from shinywidgets import output_widget, render_plotly
 import pandas as pd
 import os
 import re
@@ -8,6 +9,9 @@ import base64
 from app.utils.config import PROJECT_ID, DATASET_ID
 from app.data.processor import get_universal_portal_data, apply_sanity_filter
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
+
+# Generous limit for the dynamic plot factory
+MAX_CHARTS = 50
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -86,6 +90,21 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         except:
             return pd.DataFrame()
 
+    @reactive.Calc
+    def shared_chart_data():
+        """Consolidates data fetching and filtering to feed the UI loop and the Plotly factory."""
+        df = get_clean_data()
+        if df.empty: return None, None, []
+        
+        sys_filter = input.selected_systems() if hasattr(input, 'selected_systems') else []
+        if sys_filter:
+            df = df[df['System'].astype(str).isin(sys_filter)]
+            
+        map_df = get_map_coords()
+        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
+        
+        return df, map_df, valid_locations
+
     # --- UI RENDERING ---
     @output
     @render.ui
@@ -101,87 +120,108 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
     @output
     @render.ui
     def dynamic_charts_ui():
-        df = get_clean_data()
+        df, map_df, valid_locations = shared_chart_data()
         proj = selected_project() if callable(selected_project) else selected_project
-        if df.empty or proj == "All Projects": return ui.p("No data available for this timeline.", class_="text-warning")
-
-        # Apply system filter
-        sys_filter = input.selected_systems() if hasattr(input, 'selected_systems') else []
-        if sys_filter:
-            df = df[df['System'].astype(str).isin(sys_filter)]
-
-        # Unwrap context variables
-        map_df = get_map_coords()
-        u_mode = unit_mode() if callable(unit_mode) else unit_mode
-        u_lbl = unit_label() if callable(unit_label) else unit_label
-        tz = display_tz() if callable(display_tz) else display_tz
-        refs = active_refs() if callable(active_refs) else active_refs
-        days = lookback_days() if callable(lookback_days) else lookback_days
-        show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
-        show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
-
-        end_date = pd.Timestamp.now()
-        start_date = end_date - pd.Timedelta(days=days)
-
-        p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
-        real_f_date = p_meta.get('Date_Freezedown')
-        freeze_start_ts = start_date
         
-        parsed_date = pd.to_datetime(real_f_date, errors='coerce')
-        if pd.notnull(parsed_date):
-            freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
+        if df is None or not valid_locations or proj == "All Projects": 
+            return ui.p("No data available for this timeline.", class_="text-warning")
 
-        job_num = proj.split('-')[0].strip()
-        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
+        show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
 
-        chart_blocks = []
-
-        for loc in valid_locations:
-            loc_data = df[df['Location'] == loc]
-            if loc_data.empty: continue
-
+        ui_elements = []
+        for i, loc in enumerate(valid_locations):
+            loc_clean = str(loc).strip().upper()
+            is_temp_pipe = loc_clean.startswith('T')
+            
             has_map = False
-            if not map_df.empty and 'Location' in map_df.columns:
-                has_map = str(loc) in map_df['Location'].astype(str).values
+            if is_temp_pipe and not map_df.empty and 'Location' in map_df.columns:
+                if loc_clean in map_df['Location'].values:
+                    has_map = True
 
-            fig = build_high_speed_graph(
-                client=client, df=loc_data, title=f"Thermal Trends: {loc}",
-                start_view=start_date, end_view=end_date, active_refs=refs,
-                unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
-                f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
+            # If it's a Temp Pipe and has a map, render side-by-side. 
+            # If it's a Brine bank (or missing a map), render full width.
+            if has_map and show_map_opt:
+                chart_layout = ui.layout_columns(
+                    ui.div(output_widget(f"timeline_chart_{i}")),
+                    ui.div(output_widget(f"timeline_map_{i}")),
+                    col_widths=[9, 3]
+                )
+            else:
+                chart_layout = output_widget(f"timeline_chart_{i}")
+
+            ui_elements.append(
+                ui.card(
+                    chart_layout,
+                    style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                )
             )
-            
-            if fig:
-                # 1. Base64 Encode the Main Chart to guarantee execution
-                plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
-                b64_plot = base64.b64encode(plot_html.encode("utf-8")).decode("utf-8")
-                fig_iframe = f'<iframe src="data:text/html;base64,{b64_plot}" width="100%" height="700px" style="border:none; overflow:hidden;"></iframe>'
 
-                if has_map and show_map_opt:
-                    site_map_fig = build_cropped_site_map(job_num, loc, map_df, "as_builts")
-                    if site_map_fig:
-                        # 2. Base64 Encode the Map Chart
-                        map_html = site_map_fig.to_html(full_html=True, include_plotlyjs="cdn")
-                        b64_map = base64.b64encode(map_html.encode("utf-8")).decode("utf-8")
-                        map_iframe = f'<iframe src="data:text/html;base64,{b64_map}" width="100%" height="700px" style="border:none; overflow:hidden;"></iframe>'
-                        
-                        row_html = f'''
-                        <div style="display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px;">
-                            <div style="flex: 3; min-width: 600px;">{fig_iframe}</div>
-                            <div style="flex: 1; min-width: 250px;">{map_iframe}</div>
-                        </div>
-                        <hr>
-                        '''
-                        chart_blocks.append(ui.HTML(row_html))
-                    else:
-                        chart_blocks.append(ui.HTML(f'<div style="margin-bottom: 20px;">{fig_iframe}</div><div class="alert alert-info" style="color: black;">🗺️ Map image for {job_num} not found in the as_builts folder.</div><hr>'))
-                else:
-                    chart_blocks.append(ui.HTML(f'<div style="margin-bottom: 20px;">{fig_iframe}</div><hr>'))
+        return ui.TagList(*ui_elements)
 
-        if not chart_blocks:
-            return ui.p("No valid locations to display.", class_="text-warning")
-            
-        return ui.div(*chart_blocks)
+    # --- FACTORY PATTERN: PLOTLY WIDGET INJECTION ---
+    for i in range(MAX_CHARTS):
+        def make_timeline_chart(index):
+            @output(id=f"timeline_chart_{index}")
+            @render_plotly
+            def _plot():
+                df, map_df, locs = shared_chart_data()
+                if df is not None and index < len(locs):
+                    loc = locs[index]
+                    loc_data = df[df['Location'] == loc]
+                    if loc_data.empty: return None
+
+                    u_mode = unit_mode() if callable(unit_mode) else unit_mode
+                    u_lbl = unit_label() if callable(unit_label) else unit_label
+                    tz = display_tz() if callable(display_tz) else display_tz
+                    refs = active_refs() if callable(active_refs) else active_refs
+                    days = lookback_days() if callable(lookback_days) else lookback_days
+                    show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
+                    proj = selected_project() if callable(selected_project) else selected_project
+                    
+                    end_date = pd.Timestamp.now()
+                    start_date = end_date - pd.Timedelta(days=days)
+
+                    p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
+                    real_f_date = p_meta.get('Date_Freezedown')
+                    freeze_start_ts = start_date
+                    
+                    parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+                    if pd.notnull(parsed_date):
+                        freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
+                    
+                    fig = build_high_speed_graph(
+                        client=client, df=loc_data, title=f"Thermal Trends: {loc}",
+                        start_view=start_date, end_view=end_date, active_refs=refs,
+                        unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
+                        f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
+                    )
+                    return fig
+                return None
+            return _plot
+
+        def make_timeline_map(index):
+            @output(id=f"timeline_map_{index}")
+            @render_plotly
+            def _map():
+                df, map_df, locs = shared_chart_data()
+                if df is not None and index < len(locs):
+                    loc = locs[index]
+                    loc_clean = str(loc).strip().upper()
+                    is_temp_pipe = loc_clean.startswith('T')
+                    show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
+                    
+                    if is_temp_pipe and show_map_opt and not map_df.empty and 'Location' in map_df.columns:
+                        if loc_clean in map_df['Location'].values:
+                            proj = selected_project() if callable(selected_project) else selected_project
+                            job_num = proj.split('-')[0].strip()
+                            as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+                            map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
+                            return map_fig
+                return None
+            return _map
+
+        make_timeline_chart(i)
+        make_timeline_map(i)
 
     @output
     @render.ui
