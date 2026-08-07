@@ -1,35 +1,14 @@
+from shiny import ui, render, reactive, module
 import pandas as pd
-import sys
-
-# --- SAFE FRAMEWORK DETECTION ---
-try:
-    import streamlit as st
-    # Smart detection: If Shiny is running the app, it will be in sys.modules.
-    # This prevents Shiny from trying to read Streamlit session states or secrets.
-    if 'shiny' in sys.modules:
-        HAS_STREAMLIT = False
-    else:
-        HAS_STREAMLIT = True
-except ImportError:
-    HAS_STREAMLIT = False
 
 # Internal Data & Config
-from app.data.processor import get_bq_client
 from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER_VIEW
 
-def get_summary_data(selected_project, show_archived_opt=None):
+def get_summary_data(client, selected_project, show_archived):
     """
     Pure Python function to retrieve all summary data matrices.
     Returns: (active_projs_df, pool_df, tel_df, error_msg)
     """
-    # Safe fallback: rely on the passed argument first, default to False
-    show_archived = False
-    if show_archived_opt is not None:
-        show_archived = show_archived_opt
-    elif HAS_STREAMLIT:
-        show_archived = st.session_state.get('global_show_archived', False)
-        
-    client = get_bq_client()
     if client is None: return None, None, None, "Database connection unavailable."
 
     status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
@@ -60,7 +39,7 @@ def get_summary_data(selected_project, show_archived_opt=None):
         return None, None, None, f"Project Registry failed: {e}"
 
     if active_projs.empty:
-        return pd.DataFrame(), None, None, "No projects found in registry."
+        return pd.DataFrame(), None, None, "No projects found in registry matching the criteria."
 
     pool_q = f"""
         SELECT CAST(Project AS STRING) as Project, Phase, System, UPPER(CAST(Location AS STRING)) as Location, COUNT(DISTINCT NodeNum) as total_assigned
@@ -103,168 +82,180 @@ def get_summary_data(selected_project, show_archived_opt=None):
 
     return active_projs, pool_df, tel_df, None
 
-##############################
-# Page 1 - Dashboard Summary #
-##############################
-def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz):
-    """
-    Renders Active Project Summary.
-    Safely bypasses Streamlit UI rendering if executed within Shiny.
-    """
-    if not HAS_STREAMLIT:
-        return
-        
-    show_archived = st.session_state.get('global_show_archived', False)
-    
-    if selected_project and selected_project != "All Projects":
-        st.header(f"📊 Project Summary: {selected_project}")
-    elif show_archived:
-        st.header("🌐 Global Project Summary (Includes Archived)")
-    else:
-        st.header("🌐 Global Active Project Summary")
-        
-    # --- Execute Pure Python DB Extraction ---
-    active_projs, pool_df, tel_df, err = get_summary_data(selected_project, show_archived)
-    
-    if err:
-        if active_projs is not None and active_projs.empty:
-            st.info(err)
+# =============================================================================
+# SHINY UI MODULE
+# =============================================================================
+@module.ui
+def summary_ui():
+    """Defines the visual layout for the Summary page."""
+    return ui.div(
+        ui.output_ui("dashboard_header"),
+        ui.hr(),
+        ui.output_ui("project_cards_ui")
+    )
+
+# =============================================================================
+# SHINY SERVER MODULE
+# =============================================================================
+@module.server
+def summary_server(input, output, session, client, selected_project, global_show_archived, unit_mode, unit_label, display_tz, global_show_ambient):
+    """Handles reactive database fetching and rendering for the Summary page."""
+
+    @output
+    @render.ui
+    def dashboard_header():
+        proj = selected_project() if callable(selected_project) else selected_project
+        show_arch = global_show_archived() if callable(global_show_archived) else global_show_archived
+
+        if proj and proj != "All Projects":
+            return ui.h2(f"📊 Project Summary: {proj}")
+        elif show_arch:
+            return ui.h2("🌐 Global Project Summary (Includes Archived)")
         else:
-            st.error(err)
-        return
-        
-    # --- RENDER ENGINE ---
-    for _, row in active_projs.iterrows():
-        p_project = str(row['Project']).strip()
-        p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
-        
-        is_active = str(row.get('ShowActive', 'FALSE')).strip().upper() in ['TRUE', 'YES', '1']
-        p_status = str(row.get('ProjectStatus', 'Archived')).strip()
-        if not p_status or p_status.lower() in ['nan', 'none']:
-            p_status = "Archived"
+            return ui.h2("🌐 Global Active Project Summary")
+
+    @output
+    @render.ui
+    def project_cards_ui():
+        if client is None:
+            return ui.p("Database connection unavailable.", class_="text-danger")
+
+        # Resolve reactive dependencies
+        proj = selected_project() if callable(selected_project) else selected_project
+        show_arch = global_show_archived() if callable(global_show_archived) else global_show_archived
+        tz = display_tz() if callable(display_tz) else display_tz
+        u_mode = unit_mode() if callable(unit_mode) else unit_mode
+        u_lbl = unit_label() if callable(unit_label) else unit_label
+        show_amb = global_show_ambient() if callable(global_show_ambient) else global_show_ambient
+
+        active_projs, pool_df, tel_df, err = get_summary_data(client, proj, show_arch)
+
+        if err:
+            return ui.p(err, class_="text-danger")
+        if active_projs is None or active_projs.empty:
+            return ui.p("No active projects found matching the criteria.", class_="text-muted")
+
+        def build_metric_card(title, g_df, target_temp):
+            if g_df.empty or g_df['latest_temp'].isnull().all():
+                return ui.card(ui.h6(title), ui.p("No recent data", class_="text-muted"), style="background-color: #f8f9fa;")
+
+            latest_val = g_df['latest_temp'].mean()
+            c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
+            m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
+
+            def convert(v):
+                if pd.isnull(v) or pd.isna(v): return None
+                return (v - 32) * 5/9 if u_mode == "Celsius" else v
+
+            l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
+
+            pct_html = ""
+            if target_temp is not None:
+                total_valid_nodes = g_df['NodeNum'].nunique()
+                if total_valid_nodes > 0:
+                    nodes_meeting = g_df[g_df['latest_temp'] <= target_temp]['NodeNum'].nunique()
+                    pct = (nodes_meeting / total_valid_nodes) * 100
+                    color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+                    display_target = (target_temp - 32) * 5/9 if u_mode == "Celsius" else target_temp
+                    pct_html = f"<span style='color:{color}; font-size:0.85rem; font-weight:bold;'>{pct:.0f}%</span> <span style='font-size:0.85rem; color:{color};'>Nodes ≤ {display_target:.1f}{u_lbl}</span>"
+
+            curr_str = f"{c_min:.1f} to {c_max:.1f}{u_lbl}" if c_min is not None else "No Data"
+            hist_str = f"{m24:.1f} to {x24:.1f}{u_lbl}" if m24 is not None else "No Data"
+
+            return ui.card(
+                ui.h6(title, style="margin-bottom: 0px;"),
+                ui.h2(f"{l_conv:.1f}{u_lbl}", style="margin-top: 5px; margin-bottom: 0px; color: #1f77b4;"),
+                ui.HTML(pct_html) if pct_html else ui.HTML("<div style='height: 18px;'></div>"),
+                ui.hr(style="margin-top: 10px; margin-bottom: 10px;"),
+                ui.HTML(f"<div style='font-size: 0.8rem; line-height: 1.3; color: #555;'><b>Current Range:</b> {curr_str}<br><b>24h Range:</b> {hist_str}</div>"),
+                style="border-top: 4px solid #1f77b4;"
+            )
+
+        # Build cards for each active project
+        cards = []
+        for _, row in active_projs.iterrows():
+            p_project = str(row['Project']).strip()
+            p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
+            is_active = str(row.get('ShowActive', 'FALSE')).strip().upper() in ['TRUE', 'YES', '1']
+            p_status = str(row.get('ProjectStatus', 'Archived')).strip()
+            if not p_status or p_status.lower() in ['nan', 'none']: p_status = "Archived"
             
-        f_date = row.get('Date_Freezedown')
-        m_date = row.get('Date_Maintenance') 
+            f_date = row.get('Date_Freezedown')
+            m_date = row.get('Date_Maintenance') 
 
-        def is_valid_date(val):
-            if pd.isnull(val): return False
-            val_str = str(val).strip().lower()
-            if val_str in ['', 'nan', 'nat', 'none', '<na>']: return False
-            return True
+            def is_valid_date(val):
+                if pd.isnull(val): return False
+                val_str = str(val).strip().lower()
+                return val_str not in ['', 'nan', 'nat', 'none', '<na>']
 
-        header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
+            header_html = "<div style='text-align: right;'><small>Start: Not Set</small></div>"
 
-        if is_valid_date(f_date):
-            f_date_dt = pd.to_datetime(f_date).date()
-            f_date_display = f_date_dt.strftime('%b %d, %Y')
-            total_freezedown_days = (pd.Timestamp.now(tz=display_tz).date() - f_date_dt).days
-            
-            if is_valid_date(m_date):
-                m_date_dt = pd.to_datetime(m_date).date()
-                m_date_display = m_date_dt.strftime('%b %d, %Y')
-                time_to_freeze = (m_date_dt - f_date_dt).days
-                maintenance_days = (pd.Timestamp.now(tz=display_tz).date() - m_date_dt).days
+            if is_valid_date(f_date):
+                f_date_dt = pd.to_datetime(f_date).date()
+                total_freezedown_days = (pd.Timestamp.now(tz=tz).date() - f_date_dt).days
                 
-                header_html = f"""
-                    <div style='text-align: right; line-height: 1.3;'>
-                        🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
-                        <small style='color: #666;'>Start Freezedown: {f_date_display}</small><br>
-                        <span style='color: #28a745; display: inline-block; margin-top: 4px;'>✅ <b>Full Freezedown Provided</b></span><br>
-                        <small style='color: #666;'>
-                            Start Maintenance: {m_date_display}<br>
-                            Time to Freeze: {max(0, time_to_freeze)} Days | In Maintenance: {max(0, maintenance_days)} Days
-                        </small>
-                    </div>
-                """
-            else:
-                header_html = f"""
-                    <div style='text-align: right; line-height: 1.3;'>
-                        🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
-                        <small style='color: #666;'>Start Freezedown: {f_date_display}</small>
-                    </div>
-                """
-
-        if not is_active:
-            with st.container(border=True):
-                h1, h2 = st.columns([2, 1])
-                h1.subheader(f"📦 {p_name}")
-                h1.markdown(f"**Project Status:** `{p_status}`")
-                h2.markdown(header_html, unsafe_allow_html=True)
-            continue
-            
-        job_num = p_project.split('-')[0].strip()
-        target_phase = ""
-        if "Phase 1" in p_project or "Phase1" in p_project: target_phase = "1"
-        elif "Phase 2" in p_project or "Phase2" in p_project: target_phase = "2"
-        elif "Phase 3" in p_project or "Phase3" in p_project: target_phase = "3"
-
-        pool_matches = pool_df[
-            (pool_df['Project'].str.startswith(job_num)) & 
-            ((pool_df['Phase'] == target_phase) | (target_phase == ""))
-        ]
-        
-        raw_systems = [str(s).strip() for s in pool_matches['System'].unique() if str(s).strip()]
-        systems = sorted(list(set(raw_systems)))
-        if not systems:
-            systems = [""] 
-
-        if tel_df.empty:
-            tel_matches = pd.DataFrame(columns=tel_df.columns)
-        else:
-            tel_matches = tel_df[
-                (tel_df['Project'].str.startswith(job_num)) & 
-                ((tel_df['Phase'] == target_phase) | (target_phase == ""))
-            ]
-
-        for sys in systems:
-            if sys == "":
-                block_pool = pool_matches
-            else:
-                block_pool = pool_matches[(pool_matches['System'] == sys) | (pool_matches['Location'] == 'AMBIENT')]
-                
-            total_assigned = block_pool['total_assigned'].sum() if not block_pool.empty else 0
-            
-            if not tel_matches.empty:
-                is_sys = tel_matches['System'] == sys
-                is_amb = tel_matches['Location'].astype(str).str.upper() == 'AMBIENT'
-                if sys == "": 
-                    sys_tel = tel_matches
+                if is_valid_date(m_date):
+                    m_date_dt = pd.to_datetime(m_date).date()
+                    time_to_freeze = (m_date_dt - f_date_dt).days
+                    maintenance_days = (pd.Timestamp.now(tz=tz).date() - m_date_dt).days
+                    
+                    header_html = f"""
+                        <div style='text-align: right; line-height: 1.3;'>
+                            🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
+                            <span style='color: #28a745; display: inline-block; margin-top: 4px;'>✅ <b>Full Freezedown Provided</b></span><br>
+                            <small style='color: #666;'>Time to Freeze: {max(0, time_to_freeze)} Days | In Maintenance: {max(0, maintenance_days)} Days</small>
+                        </div>
+                    """
                 else:
-                    sys_tel = tel_matches[is_sys | is_amb]
-            else:
-                sys_tel = tel_matches 
+                    header_html = f"""
+                        <div style='text-align: right; line-height: 1.3;'>
+                            🗓️ <b>Freezedown: {max(0, total_freezedown_days)} Days</b><br>
+                            <small style='color: #666;'>Start Freezedown: {f_date_dt.strftime('%b %d, %Y')}</small>
+                        </div>
+                    """
 
-            if total_assigned == 0 and sys_tel.empty:
-                continue 
+            if not is_active:
+                cards.append(ui.card(
+                    ui.layout_columns(
+                        ui.div(ui.h4(f"📦 {p_name}"), ui.p(f"Project Status: {p_status}", class_="text-muted")),
+                        ui.HTML(header_html)
+                    ),
+                    style="background-color: #f8f9fa; opacity: 0.8;"
+                ))
+                continue
 
-            title_ext = []
-            if target_phase: title_ext.append(f"Phase {target_phase}")
-            if sys: title_ext.append(f"System {sys}")
-            title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
+            job_num = p_project.split('-')[0].strip()
+            target_phase = "1" if "Phase 1" in p_project or "Phase1" in p_project else "2" if "Phase 2" in p_project or "Phase2" in p_project else "3" if "Phase 3" in p_project or "Phase3" in p_project else ""
 
-            with st.container(border=True):
-                h1, h2 = st.columns([2, 1])
-                h1.subheader(f"🏗️ {p_name}{title_suffix}")
-                h2.markdown(header_html, unsafe_allow_html=True)
-                st.markdown(f"🔗 **External Client Portal:** [{p_name} Portal Site Link](https://sf{job_num}.streamlit.app)")
+            pool_matches = pool_df[(pool_df['Project'].str.startswith(job_num)) & ((pool_df['Phase'] == target_phase) | (target_phase == ""))]
+            systems = sorted(list(set([str(s).strip() for s in pool_matches['System'].unique() if str(s).strip()])))
+            if not systems: systems = [""] 
+
+            tel_matches = pd.DataFrame(columns=tel_df.columns) if tel_df.empty else tel_df[(tel_df['Project'].str.startswith(job_num)) & ((tel_df['Phase'] == target_phase) | (target_phase == ""))]
+
+            for sys in systems:
+                block_pool = pool_matches if sys == "" else pool_matches[(pool_matches['System'] == sys) | (pool_matches['Location'] == 'AMBIENT')]
+                total_assigned = block_pool['total_assigned'].sum() if not block_pool.empty else 0
                 
+                sys_tel = tel_matches if sys == "" or tel_matches.empty else tel_matches[(tel_matches['System'] == sys) | (tel_matches['Location'].astype(str).str.upper() == 'AMBIENT')]
+
+                if total_assigned == 0 and sys_tel.empty:
+                    continue 
+
+                title_ext = []
+                if target_phase: title_ext.append(f"Phase {target_phase}")
+                if sys: title_ext.append(f"System {sys}")
+                title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
+
                 if not sys_tel.empty:
                     active_1h = sys_tel[sys_tel['checkins_1h'] > 0]['NodeNum'].nunique()
                     active_6h = sys_tel[sys_tel['checkins_6h'] > 0]['NodeNum'].nunique()
                     active_24h = sys_tel[sys_tel['checkins_24h'] > 0]['NodeNum'].nunique()
-                    
                     latest_ts = sys_tel['latest_ts'].max()
+                    
                     if pd.notnull(latest_ts):
-                        now_utc = pd.Timestamp.now(tz='UTC')
-                        elapsed_mins = int((now_utc - latest_ts).total_seconds() / 60)
-                        
-                        if elapsed_mins <= 60:
-                            pulse = f"🟢 **Live** ({elapsed_mins}m ago)"
-                        elif elapsed_mins <= 180:
-                            pulse = f"🟠 **Delayed** ({elapsed_mins}m ago)"
-                        else:
-                            pulse = f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
-                            
+                        elapsed_mins = int((pd.Timestamp.now(tz='UTC') - latest_ts).total_seconds() / 60)
+                        pulse = f"🟢 **Live** ({elapsed_mins}m ago)" if elapsed_mins <= 60 else f"🟠 **Delayed** ({elapsed_mins}m ago)" if elapsed_mins <= 180 else f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
                         data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts.strftime('%b %d, %H:%M UTC')})*"
                     else:
                         data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
@@ -273,87 +264,39 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                     data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
-                
-                st.markdown(
-                    f"{status_color} **Hardware Status:** `{active_1h}` (1h) | "
-                    f"`{active_6h}` (6h) | `{active_24h}` (24h) | "
-                    f"Assigned Pool: `{total_assigned}`<br>"
-                    f"{data_age_str}",
-                    unsafe_allow_html=True
+                status_html = f"{status_color} <b>Hardware Status:</b> <code>{active_1h}</code> (1h) | <code>{active_6h}</code> (6h) | <code>{active_24h}</code> (24h) | Assigned Pool: <code>{total_assigned}</code><br>{data_age_str}"
+
+                # Metric Columns
+                metric_columns = []
+                if not sys_tel.empty:
+                    is_amb_col = sys_tel['Location'].astype(str).str.upper() == 'AMBIENT'
+                    is_tp_col = sys_tel['Depth'].notnull() & (sys_tel['Depth'].astype(str).str.strip() != '') & ~is_amb_col
+                    is_s_col = (sys_tel['Bank'].astype(str).str.startswith('S') | sys_tel['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
+                    is_r_col = (sys_tel['Bank'].astype(str).str.startswith('R') | sys_tel['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
+
+                    groups_data = [
+                        ("📥 Supply", sys_tel[is_s_col], -10), 
+                        ("📤 Return", sys_tel[is_r_col], 0), 
+                        ("📏 TempPipes", sys_tel[is_tp_col], 32)
+                    ]
+                    if show_amb: groups_data.append(("☁️ Ambient", sys_tel[is_amb_col], None))
+
+                    for title, g_df, tgt in groups_data:
+                        metric_columns.append(build_metric_card(title, g_df, tgt))
+
+                cards.append(
+                    ui.card(
+                        ui.layout_columns(
+                            ui.div(
+                                ui.h4(f"🏗️ {p_name}{title_suffix}"),
+                                ui.a(f"🔗 External Client Portal", href=f"https://sf{job_num}.streamlit.app", target="_blank")
+                            ),
+                            ui.HTML(header_html)
+                        ),
+                        ui.HTML(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px; margin-bottom: 15px;'>{status_html}</div>"),
+                        ui.layout_columns(*metric_columns) if metric_columns else ui.p(f"No recent telemetry received for {p_project}{title_suffix}.", class_="text-muted"),
+                        style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                    )
                 )
-                st.divider() 
 
-                if sys_tel.empty:
-                    st.info(f"No recent telemetry received for {p_project}{title_suffix}.")
-                    continue
-
-                is_amb_col = sys_tel['Location'].astype(str).str.upper() == 'AMBIENT'
-                is_tp_col = sys_tel['Depth'].notnull() & (sys_tel['Depth'].astype(str).str.strip() != '') & ~is_amb_col
-                is_s_col = (sys_tel['Bank'].astype(str).str.startswith('S') | sys_tel['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
-                is_r_col = (sys_tel['Bank'].astype(str).str.startswith('R') | sys_tel['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
-
-                groups_data = [
-                    ("📥 Supply", sys_tel[is_s_col], -10), 
-                    ("📤 Return", sys_tel[is_r_col], 0), 
-                    ("📏 TempPipes", sys_tel[is_tp_col], 32)
-                ]
-
-                if st.session_state.get("global_show_ambient", True):
-                    groups_data.append(("☁️ Ambient", sys_tel[is_amb_col], None))
-
-                cols = st.columns(len(groups_data))
-                for idx, (title, g_df, target_temp) in enumerate(groups_data):
-                    with cols[idx]:
-                        render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label)
-
-def render_dashboard_column(title, g_df, target_temp, unit_mode, unit_label):
-    st.markdown(f"**{title}**")
-    if g_df.empty or g_df['latest_temp'].isnull().all():
-        st.caption("No recent data")
-        return
-    
-    latest_val = g_df['latest_temp'].mean()
-    c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
-    m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
-
-    def convert(v):
-        if pd.isnull(v) or pd.isna(v): return None
-        return (v - 32) * 5/9 if unit_mode == "Celsius" else v
-
-    l_conv, c_min, c_max, m24, x24 = map(convert, [latest_val, c_min, c_max, m24, x24])
-
-    st.metric("Avg (Latest)", f"{l_conv:.1f}{unit_label}")
-    
-    if target_temp is not None:
-        total_valid_nodes = g_df['NodeNum'].nunique()
-        if total_valid_nodes > 0:
-            nodes_meeting_target = g_df[g_df['latest_temp'] <= target_temp]['NodeNum'].nunique()
-            pct = (nodes_meeting_target / total_valid_nodes) * 100
-            color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
-            
-            display_target = target_temp
-            if unit_mode == "Celsius":
-                display_target = (target_temp - 32) * 5/9
-                
-            st.markdown(f"<p style='font-size:0.85rem; color:{color};'><b>{pct:.0f}%</b> Nodes ≤ {display_target:.1f}{unit_label}</p>", unsafe_allow_html=True)
-
-    range_html = "<div style='font-size: 0.8rem; line-height: 1.2; margin-bottom: 10px;'><b>Normal Ranges:</b><br>"
-    if c_min is not None and c_max is not None:
-        range_html += f"Current: {c_min:.1f} to {c_max:.1f}{unit_label}<br>"
-    else:
-        range_html += "Current: No Data<br>"
-    
-    if m24 is not None and x24 is not None:
-        range_html += f"24h Range: {m24:.1f} to {x24:.1f}{unit_label}"
-    else:
-        range_html += "24h Range: No Data"
-    range_html += "</div>"
-    st.markdown(range_html, unsafe_allow_html=True)
-    st.markdown("<div style='font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 5px;'>", unsafe_allow_html=True)
-
-def get_trend_arrow(current, previous):
-    if pd.isnull(current) or pd.isnull(previous): return "N/A"
-    delta = current - previous
-    if delta > 0.1: return f"🔺 +{delta:.1f}"
-    if delta < -0.1: return f"🔹 {delta:.1f}"
-    return "➡️ 0.0"
+        return ui.div(*cards)
