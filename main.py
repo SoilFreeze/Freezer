@@ -1,4 +1,4 @@
-import streamlit as st
+from shiny import App, ui
 import pandas as pd
 import time
 import os
@@ -20,11 +20,33 @@ from app.pages.admin import render_admin_page
 from app.components.charts import build_cropped_site_map
 
 
-# 1. UI SETUP
-st.set_page_config(page_title="SoilFreeze Data Lab", page_icon="❄️", layout="wide")
+# 1. Define your Shiny UI layout
+app_ui = ui.page_fluid(
+    ui.panel_title("❄️ SoilFreeze Data Lab"),
+    ui.layout_sidebar(
+        ui.sidebar(
+            ui.h3("Navigation"),
+            ui.input_select(
+                "nav_page", 
+                "Select Page", 
+                ["Summary", "Time vs Temp", "Depth Charts", "Sensor Status"]
+            ),
+            ui.hr(),
+            ui.input_action_button("refresh_btn", "🔄 Refresh Data", class_="btn-primary")
+        ),
+        ui.output_ui("main_content")
+    )
+)
 
-# 2. SIDEBAR NAVIGATION
-st.sidebar.title("❄️ SoilFreeze Lab")
+# 2. Define your Shiny Server logic
+def server(input, output, session):
+    @output
+    @ui.render.text
+    def main_content():
+        return f"Currently viewing: {input.nav_page()}"
+
+# 3. Export the global 'app' object required by Connect Cloud
+app = App(app_ui, server)
 
 # PAGE NAVIGATION
 page = st.sidebar.selectbox(
