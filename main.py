@@ -15,6 +15,7 @@ from app.pages.processing import processing_ui, processing_server
 from app.pages.sensors import sensors_ui, sensors_server
 from app.pages.diagnostics import diagnostics_ui, diagnostics_server
 from app.pages.summary import summary_ui, summary_server
+from app.pages.time_vs_temp import time_vs_temp_ui, time_vs_temp_server
 
 # =============================================================================
 # 1. UI SETUP & SIDEBAR NAVIGATION
@@ -103,7 +104,32 @@ def server(input, output, session):
     def current_display_tz():
         tz_lookup = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacific)": "US/Pacific"}
         return tz_lookup.get(input.tz_picker(), "UTC")
-
+        
+    @reactive.Calc
+        def current_lookback_days():
+            if hasattr(input, "full_data_toggle") and input.full_data_toggle():
+                p_meta = project_metadata.get()
+                real_f_date = p_meta.get('Date_Freezedown')
+                parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+                
+                if pd.notnull(parsed_date):
+                    if parsed_date.tzinfo is not None:
+                        parsed_date = parsed_date.tz_localize(None)
+                    days_since = (pd.Timestamp.now() - parsed_date).days
+                    return max(7, days_since + 2)
+                return 90 # Fallback if no date is set
+            else:
+                weeks = input.lookback_weeks() if hasattr(input, "lookback_weeks") else 5
+                return weeks * 7
+    
+        @reactive.Calc
+        def current_active_refs():
+            refs = []
+            if input.ref_freezing(): refs.append((32.0, "Freezing"))
+            if input.ref_type_b(): refs.append((26.6, "Type B"))
+            if input.ref_type_a(): refs.append((10.2, "Type A"))
+            return tuple(refs)
+            
     # --- DYNAMIC PROJECT SELECTOR ---
     @output
     @render.ui
@@ -226,7 +252,7 @@ def server(input, output, session):
             return ui.div(ui.h4(f"👈 Please select a specific project from the sidebar to view the {page} dashboard.", class_="text-info"))
 
         if page == "Time vs Temp":
-            return ui.div(ui.h3("Time vs Temp Placeholder"))
+            return ui.div(time_vs_temp_ui("time_vs_temp_module"))
         elif page == "Depth Charts":
             return ui.div(ui.h3("Depth Charts Placeholder"))
         elif page == "Sensor Status":
