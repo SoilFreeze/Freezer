@@ -138,18 +138,20 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 if loc_clean in map_df['Location'].values:
                     has_map = True
 
-            # THE FIX: Wrap the dynamic IDs in session.ns() so Shiny knows they belong to this module!
-            chart_id = session.ns(f"timeline_chart_{i}")
-            map_id = session.ns(f"timeline_map_{i}")
+            # THE FIX: DO NOT use session.ns() here. shinywidgets automatically resolves 
+            # namespaces inside the UI component loop. Double-namespacing causes the gray line!
+            chart_id = f"timeline_chart_{i}"
+            map_id = f"timeline_map_{i}"
 
             if has_map and show_map_opt:
                 chart_layout = ui.layout_columns(
-                    ui.div(output_widget(chart_id)),
-                    ui.div(output_widget(map_id)),
+                    ui.div(output_widget(chart_id, height="750px")),
+                    ui.div(output_widget(map_id, height="750px")),
                     col_widths=[9, 3]
                 )
             else:
-                chart_layout = output_widget(chart_id)
+                # Give it full width and an explicit height so it doesn't collapse
+                chart_layout = output_widget(chart_id, width="100%", height="750px")
 
             ui_elements.append(
                 ui.card(
