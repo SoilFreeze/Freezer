@@ -1,5 +1,4 @@
 from shiny import App, ui, render, reactive
-from shinywidgets import output_widget, render_plotly
 import pandas as pd
 import time
 import os
@@ -7,17 +6,14 @@ import re
 
 # Internal imports
 from app.utils import config
-from app.data.processor import get_universal_portal_data, apply_sanity_filter, get_bq_client
-from app.components.charts import build_high_speed_graph, build_cropped_site_map
+from app.data.processor import get_bq_client
 from app.utils.config import PROJECT_ID, DATASET_ID
 
-# External Page Renders (These will need UI/Server adjustments in the future)
-from app.pages.summary import render_summary_dashboard
-from app.pages.depth import render_depth_charts
+# Module Imports (The Shiny modules we just created)
+from app.pages.admin import admin_ui, admin_server
+from app.pages.processing import processing_ui, processing_server
 from app.pages.sensors import sensors_ui, sensors_server
-from app.pages.diagnostics import render_node_diagnostics
-from app.pages.processing import render_data_processing_page
-from app.pages.admin import render_admin_page
+from app.pages.diagnostics import diagnostics_ui, diagnostics_server
 
 # =============================================================================
 # 1. UI SETUP & SIDEBAR NAVIGATION
@@ -93,12 +89,18 @@ app_ui = ui.page_fluid(
 def server(input, output, session):
     client = get_bq_client()
 
-    # Reactive state variables
+    # --- REACTIVE STATE VARIABLES ---
     project_metadata = reactive.Value(None)
     authenticated = reactive.Value(False)
 
-    def natural_sort_key(text):
-        return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
+    @reactive.Calc
+    def current_unit_label():
+        return "°F" if input.unit_toggle() == "Fahrenheit" else "°C"
+
+    @reactive.Calc
+    def current_display_tz():
+        tz_lookup = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacific)": "US/Pacific"}
+        return tz_lookup.get(input.tz_picker(), "UTC")
 
     # --- DYNAMIC PROJECT SELECTOR ---
     @output
@@ -120,7 +122,6 @@ def server(input, output, session):
             
             # Store full dataframe in session to grab metadata later
             session.userData['proj_df'] = proj_df
-            
             return ui.input_select("selected_project", "🎯 Active Project", ["All Projects"] + proj_list)
         except Exception as e:
             return ui.p(f"⚠️ Error: {e}", style="color: red;")
@@ -168,6 +169,13 @@ def server(input, output, session):
             return ui.markdown("<small><i>Calculating days since freezedown...</i></small>")
         return ui.input_slider("lookback_weeks", "Select History Window (Weeks)", min=1, max=12, value=5, step=1)
 
+    # --- AUTHENTICATION TRIGGER ---
+    @reactive.Effect
+    @reactive.event(input.unlock_btn)
+    def handle_login():
+        if input.admin_pwd() == "freeze123":
+            authenticated.set(True)
+
     # --- MAIN CONTENT ROUTER ---
     @output
     @render.ui
@@ -175,16 +183,10 @@ def server(input, output, session):
         page = input.nav_page()
         proj = input.selected_project() if hasattr(input, "selected_project") else "All Projects"
         
-        # Calculate timezone and units based on sidebar inputs
-        tz_lookup = {"UTC": "UTC", "Local (US/Eastern)": "US/Eastern", "Local (US/Pacific)": "US/Pacific"}
-        display_tz = tz_lookup.get(input.tz_picker(), "UTC")
-        unit_label = "°F" if input.unit_toggle() == "Fahrenheit" else "°C"
-        
-        # 1. Global Pages
+        # 1. Global / Admin Pages
         if page in ["Summary", "Data Processing", "Admin Tools"]:
             if page == "Summary":
                 return ui.h3(f"Summary Dashboard Placeholder for {proj}")
-                # render_summary_dashboard(...) # To be refactored for Shiny
             
             if not authenticated.get():
                 return ui.div(
@@ -192,56 +194,57 @@ def server(input, output, session):
                     ui.input_password("admin_pwd", "Enter Admin Password"),
                     ui.input_action_button("unlock_btn", "Unlock Dashboard", class_="btn-warning")
                 )
-            return ui.h3(f"{page} Dashboard Placeholder")
+            
+            # Module Injectors
+            if page == "Data Processing":
+                return ui.div(processing_ui("processing_module"))
+            elif page == "Admin Tools":
+                return ui.div(admin_ui("admin_module"))
 
         # 2. Project-Specific Pages
         if proj == "All Projects":
             return ui.div(ui.h4(f"👈 Please select a specific project from the sidebar to view the {page} dashboard.", class_="text-info"))
 
-        # TIME VS TEMP
         if page == "Time vs Temp":
-            # Note: Generating dynamic UI graphs requires returning a layout of widgets
-            # For now, we set up the tab structure so Plotly outputs can be injected
-            return ui.div(
-                ui.h3("📈 Time vs Temperature Tracking"),
-                ui.navset_card_tab(
-                    ui.nav_panel("Telemetry Charts", 
-                        ui.p(f"Ready to render dynamic charts for {proj}.")
-                        # Dynamic rendering of Plotly charts goes here
-                    ),
-                    ui.nav_panel("Site As-Builts",
-                        ui.h4(f"Site As-Builts: {proj}"),
-                        ui.p("Images will load here.")
-                    )
-                )
-            )
-
+            return ui.div(ui.h3("Time vs Temp Placeholder"))
         elif page == "Depth Charts":
-            return ui.h3("Depth Charts Placeholder")
+            return ui.div(ui.h3("Depth Charts Placeholder"))
         elif page == "Sensor Status":
-            return ui.div(
-                sensors_ui("sensors_module")
-            )
-
-        sensors_server(
-            "sensors_module",
-            client=client,
-            selected_project=input.selected_project,
-            project_metadata=project_metadata, # The reactive.Value holding metadata
-            unit_mode=input.unit_toggle,
-            unit_label=unit_label,
-            display_tz=display_tz
-        )
-        
+            return ui.div(sensors_ui("sensors_module"))
         elif page == "Node Diagnostics":
-            return ui.h3("Node Diagnostics Placeholder")
+            return ui.div(diagnostics_ui("diagnostics_module"))
 
-    # --- AUTHENTICATION TRIGGER ---
-    @reactive.Effect
-    @reactive.event(input.unlock_btn)
-    def handle_login():
-        if input.admin_pwd() == "freeze123": # Tied to os.environ/secrets logic
-            authenticated.set(True)
+    # =========================================================================
+    # 3. INITIALIZE MODULE SERVERS
+    # =========================================================================
+    # These must be called at the root of the server function, outside of @render.ui
+    
+    admin_server("admin_module", 
+                 client=client, 
+                 selected_project=input.selected_project, 
+                 display_tz=current_display_tz)
+                 
+    processing_server("processing_module", 
+                      client=client, 
+                      selected_project=input.selected_project)
+                      
+    sensors_server("sensors_module", 
+                   client=client, 
+                   selected_project=input.selected_project, 
+                   project_metadata=project_metadata, 
+                   unit_mode=input.unit_toggle, 
+                   unit_label=current_unit_label, 
+                   display_tz=current_display_tz)
+                   
+    diagnostics_server("diagnostics_module", 
+                       client=client, 
+                       selected_project=input.selected_project, 
+                       display_tz=current_display_tz, 
+                       unit_mode=input.unit_toggle, 
+                       unit_label=current_unit_label, 
+                       global_show_archived=input.global_show_archived)
 
-# 3. GLOBAL EXPORT
+# =============================================================================
+# GLOBAL APP EXPORT
+# =============================================================================
 app = App(app_ui, server)
