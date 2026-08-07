@@ -104,12 +104,10 @@ def summary_server(input, output, session, client, selected_project, global_show
     @output
     @render.ui
     def dashboard_header():
-        proj = selected_project() if callable(selected_project) else selected_project
+        # Always return the Global headers regardless of the sidebar project selection
         show_arch = global_show_archived() if callable(global_show_archived) else global_show_archived
 
-        if proj and proj != "All Projects":
-            return ui.h2(f"📊 Project Summary: {proj}")
-        elif show_arch:
+        if show_arch:
             return ui.h2("🌐 Global Project Summary (Includes Archived)")
         else:
             return ui.h2("🌐 Global Active Project Summary")
@@ -121,14 +119,14 @@ def summary_server(input, output, session, client, selected_project, global_show
             return ui.p("Database connection unavailable.", class_="text-danger")
 
         # Resolve reactive dependencies
-        proj = selected_project() if callable(selected_project) else selected_project
         show_arch = global_show_archived() if callable(global_show_archived) else global_show_archived
         tz = display_tz() if callable(display_tz) else display_tz
         u_mode = unit_mode() if callable(unit_mode) else unit_mode
         u_lbl = unit_label() if callable(unit_label) else unit_label
         show_amb = global_show_ambient() if callable(global_show_ambient) else global_show_ambient
 
-        active_projs, pool_df, tel_df, err = get_summary_data(client, proj, show_arch)
+        # --- THE FIX: Force "All Projects" to bypass the sidebar dropdown entirely ---
+        active_projs, pool_df, tel_df, err = get_summary_data(client, "All Projects", show_arch)
 
         if err:
             return ui.p(err, class_="text-danger")
