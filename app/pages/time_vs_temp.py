@@ -136,8 +136,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         job_num = proj.split('-')[0].strip()
         valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
 
-        # Plotly JS Injection (Loads only once so the loop can render lightweight HTML blocks)
-        chart_blocks = [ui.HTML('<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>')]
+        chart_blocks = []
 
         for loc in valid_locations:
             loc_data = df[df['Location'] == loc]
@@ -153,29 +152,30 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
                 f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
             )
-            if fig:
             
-            # Export to HTML string natively to avoid dynamic endpoint limits
-            fig_html = fig.to_html(full_html=False, include_plotlyjs=False)
+            # --- FIXED INDENTATION & CDN TAGS ---
+            if fig:
+                # Include Plotly JS dynamically so the HTML div knows how to render itself
+                fig_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
 
-            if has_map and show_map_opt:
-                site_map_fig = build_cropped_site_map(job_num, loc, map_df, "as_builts")
-                if site_map_fig:
-                    map_html = site_map_fig.to_html(full_html=False, include_plotlyjs=False)
-                    row_html = f'''
-                    <div style="display: flex; gap: 20px; margin-bottom: 20px;">
-                        <div style="flex: 3; min-width: 0;">{fig_html}</div>
-                        <div style="flex: 1; min-width: 0;">{map_html}</div>
-                    </div>
-                    <hr>
-                    '''
-                    chart_blocks.append(ui.HTML(row_html))
+                if has_map and show_map_opt:
+                    site_map_fig = build_cropped_site_map(job_num, loc, map_df, "as_builts")
+                    if site_map_fig:
+                        map_html = site_map_fig.to_html(full_html=False, include_plotlyjs="cdn")
+                        row_html = f'''
+                        <div style="display: flex; gap: 20px; margin-bottom: 20px;">
+                            <div style="flex: 3; min-width: 0;">{fig_html}</div>
+                            <div style="flex: 1; min-width: 0;">{map_html}</div>
+                        </div>
+                        <hr>
+                        '''
+                        chart_blocks.append(ui.HTML(row_html))
+                    else:
+                        chart_blocks.append(ui.HTML(f'<div style="margin-bottom: 20px;">{fig_html}</div><div class="alert alert-info" style="color: black;">🗺️ Map image for {job_num} not found in the as_builts folder.</div><hr>'))
                 else:
-                    chart_blocks.append(ui.HTML(f'<div style="margin-bottom: 20px;">{fig_html}</div><div class="alert alert-info">🗺️ Map image for {job_num} not found in the as_builts folder.</div><hr>'))
-            else:
-                chart_blocks.append(ui.HTML(f'<div style="margin-bottom: 20px;">{fig_html}</div><hr>'))
+                    chart_blocks.append(ui.HTML(f'<div style="margin-bottom: 20px;">{fig_html}</div><hr>'))
 
-        if len(chart_blocks) == 1: # Only JS tag exists
+        if not chart_blocks:
             return ui.p("No valid locations to display.", class_="text-warning")
             
         return ui.div(*chart_blocks)
