@@ -138,16 +138,18 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 if loc_clean in map_df['Location'].values:
                     has_map = True
 
-            # If it's a Temp Pipe and has a map, render side-by-side. 
-            # If it's a Brine bank (or missing a map), render full width.
+            # THE FIX: Wrap the dynamic IDs in session.ns() so Shiny knows they belong to this module!
+            chart_id = session.ns(f"timeline_chart_{i}")
+            map_id = session.ns(f"timeline_map_{i}")
+
             if has_map and show_map_opt:
                 chart_layout = ui.layout_columns(
-                    ui.div(output_widget(f"timeline_chart_{i}")),
-                    ui.div(output_widget(f"timeline_map_{i}")),
+                    ui.div(output_widget(chart_id)),
+                    ui.div(output_widget(map_id)),
                     col_widths=[9, 3]
                 )
             else:
-                chart_layout = output_widget(f"timeline_chart_{i}")
+                chart_layout = output_widget(chart_id)
 
             ui_elements.append(
                 ui.card(
