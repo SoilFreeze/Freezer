@@ -1,5 +1,4 @@
 from shiny import ui, render, reactive, module
-from shinywidgets import output_widget, render_plotly
 import pandas as pd
 import os
 import re
@@ -9,9 +8,6 @@ import base64
 from app.utils.config import PROJECT_ID, DATASET_ID
 from app.data.processor import get_universal_portal_data, apply_sanity_filter
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
-
-# Generous limit for the dynamic plot factory
-MAX_CHARTS = 50
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -92,7 +88,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
 
     @reactive.Calc
     def shared_chart_data():
-        """Consolidates data fetching and filtering to feed the UI loop and the Plotly factory."""
+        """Consolidates data fetching and filtering to feed the UI loop."""
         df = get_clean_data()
         if df.empty: return None, None, []
         
@@ -126,10 +122,30 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         if df is None or not valid_locations or proj == "All Projects": 
             return ui.p("No data available for this timeline.", class_="text-warning")
 
+        # Unwrap inputs
         show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
+        u_mode = unit_mode() if callable(unit_mode) else unit_mode
+        u_lbl = unit_label() if callable(unit_label) else unit_label
+        tz = display_tz() if callable(display_tz) else display_tz
+        refs = active_refs() if callable(active_refs) else active_refs
+        days = lookback_days() if callable(lookback_days) else lookback_days
+        show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
+        
+        end_date = pd.Timestamp.now()
+        start_date = end_date - pd.Timedelta(days=days)
 
+        p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
+        real_f_date = p_meta.get('Date_Freezedown')
+        freeze_start_ts = start_date
+        
+        parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+        if pd.notnull(parsed_date):
+            freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
+
+        job_num = proj.split('-')[0].strip()
+        
         ui_elements = []
-        for i, loc in enumerate(valid_locations):
+        for loc in valid_locations:
             loc_clean = str(loc).strip().upper()
             is_temp_pipe = loc_clean.startswith('T')
             
@@ -138,94 +154,50 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 if loc_clean in map_df['Location'].values:
                     has_map = True
 
-            # THE FIX: DO NOT use session.ns() here. shinywidgets automatically resolves 
-            # namespaces inside the UI component loop. Double-namespacing causes the gray line!
-            chart_id = f"timeline_chart_{i}"
-            map_id = f"timeline_map_{i}"
+            loc_data = df[df['Location'] == loc]
+            if loc_data.empty: continue
+
+            # 1. Build the main chart
+            fig = build_high_speed_graph(
+                client=client, df=loc_data, title=f"Thermal Trends: {loc}",
+                start_view=start_date, end_view=end_date, active_refs=refs,
+                unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
+                f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
+            )
+            
+            if fig is None: continue
+            
+            # 2. Encode Main Chart to Base64 Iframe
+            plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
+            b64_plot = base64.b64encode(plot_html.encode("utf-8")).decode("utf-8")
+            fig_iframe = f'<iframe src="data:text/html;base64,{b64_plot}" width="100%" height="750px" style="border:none; overflow:hidden;"></iframe>'
 
             if has_map and show_map_opt:
-                chart_layout = ui.layout_columns(
-                    ui.div(output_widget(chart_id, height="750px")),
-                    ui.div(output_widget(map_id, height="750px")),
-                    col_widths=[9, 3]
-                )
+                as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+                site_map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
+                
+                if site_map_fig:
+                    # 3. Encode Map Chart to Base64 Iframe
+                    map_html = site_map_fig.to_html(full_html=True, include_plotlyjs="cdn")
+                    b64_map = base64.b64encode(map_html.encode("utf-8")).decode("utf-8")
+                    map_iframe = f'<iframe src="data:text/html;base64,{b64_map}" width="100%" height="750px" style="border:none; overflow:hidden;"></iframe>'
+                    
+                    row_html = f'''
+                    <div style="display: flex; flex-wrap: wrap; gap: 20px; width: 100%;">
+                        <div style="flex: 3; min-width: 600px;">{fig_iframe}</div>
+                        <div style="flex: 1; min-width: 250px;">{map_iframe}</div>
+                    </div>
+                    '''
+                    ui_elements.append(ui.card(ui.HTML(row_html), style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"))
+                else:
+                    ui_elements.append(ui.card(ui.HTML(f'{fig_iframe}<div style="color: gray; margin-top: 10px;">🗺️ Map image not found.</div>'), style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"))
             else:
-                # Give it full width and an explicit height so it doesn't collapse
-                chart_layout = output_widget(chart_id, width="100%", height="750px")
+                ui_elements.append(ui.card(ui.HTML(fig_iframe), style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"))
 
-            ui_elements.append(
-                ui.card(
-                    chart_layout,
-                    style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
-                )
-            )
-
+        if not ui_elements:
+            return ui.p("No valid locations to display.", class_="text-warning")
+            
         return ui.TagList(*ui_elements)
-
-    # --- FACTORY PATTERN: PLOTLY WIDGET INJECTION ---
-    for i in range(MAX_CHARTS):
-        def make_timeline_chart(index):
-            @output(id=f"timeline_chart_{index}")
-            @render_plotly
-            def _plot():
-                df, map_df, locs = shared_chart_data()
-                if df is not None and index < len(locs):
-                    loc = locs[index]
-                    loc_data = df[df['Location'] == loc]
-                    if loc_data.empty: return None
-
-                    u_mode = unit_mode() if callable(unit_mode) else unit_mode
-                    u_lbl = unit_label() if callable(unit_label) else unit_label
-                    tz = display_tz() if callable(display_tz) else display_tz
-                    refs = active_refs() if callable(active_refs) else active_refs
-                    days = lookback_days() if callable(lookback_days) else lookback_days
-                    show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
-                    proj = selected_project() if callable(selected_project) else selected_project
-                    
-                    end_date = pd.Timestamp.now()
-                    start_date = end_date - pd.Timedelta(days=days)
-
-                    p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
-                    real_f_date = p_meta.get('Date_Freezedown')
-                    freeze_start_ts = start_date
-                    
-                    parsed_date = pd.to_datetime(real_f_date, errors='coerce')
-                    if pd.notnull(parsed_date):
-                        freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
-                    
-                    fig = build_high_speed_graph(
-                        client=client, df=loc_data, title=f"Thermal Trends: {loc}",
-                        start_view=start_date, end_view=end_date, active_refs=refs,
-                        unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
-                        f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
-                    )
-                    return fig
-                return None
-            return _plot
-
-        def make_timeline_map(index):
-            @output(id=f"timeline_map_{index}")
-            @render_plotly
-            def _map():
-                df, map_df, locs = shared_chart_data()
-                if df is not None and index < len(locs):
-                    loc = locs[index]
-                    loc_clean = str(loc).strip().upper()
-                    is_temp_pipe = loc_clean.startswith('T')
-                    show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
-                    
-                    if is_temp_pipe and show_map_opt and not map_df.empty and 'Location' in map_df.columns:
-                        if loc_clean in map_df['Location'].values:
-                            proj = selected_project() if callable(selected_project) else selected_project
-                            job_num = proj.split('-')[0].strip()
-                            as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
-                            map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
-                            return map_fig
-                return None
-            return _map
-
-        make_timeline_chart(i)
-        make_timeline_map(i)
 
     @output
     @render.ui
