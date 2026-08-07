@@ -1,21 +1,19 @@
-import streamlit as st
+from shiny import ui, render, reactive, module
 import pandas as pd
 from google.cloud import bigquery
+import re
 
 # Import your custom app modules
-from app.utils.config import MASTER_VIEW, PROJECT_ID, DATASET_ID
-from app.components.charts import build_high_speed_graph
+from app.utils.config import MASTER_VIEW, PROJECT_ID, DATASET_ID, NODE_REGISTRY_TABLE
 
 # =============================================================================
-# WORKSPACE PAGE 4: SENSOR STATUS COMPONENT LIST
+# HELPER FUNCTIONS
 # =============================================================================
 def fmt_temp(val, unit_mode, unit_label):
     """Standalone helper utility to safely format raw float metrics into clean text values."""
-    if pd.isnull(val) or pd.isna(val):
-        return "N/A"
+    if pd.isnull(val) or pd.isna(val): return "N/A"
     v = (val - 32) * 5/9 if unit_mode == "Celsius" else val
     return f"{v:.1f}{unit_label}"
-
 
 def assign_row_color(hours):
     """Standalone utility mapping data latency windows directly to CSS background colors."""
@@ -29,133 +27,152 @@ def assign_row_color(hours):
         return "background-color: #fed7aa; color: #9a3412;"  # Orange / Stale
     return "background-color: #fca5a5; color: #991b1b;"      # Red / Critical
 
+def get_status_icon(hrs):
+    if hrs == float('inf') or hrs >= 999.0: return "❌ Never"
+    if hrs <= 1.0: return f"🟢 {hrs:.1f}h"
+    if hrs <= 6.0: return f"🟠 {hrs:.1f}h"
+    return f"🔴 {hrs:.1f}h"
 
-def render_sensor_status(client, selected_project, unit_label, unit_mode, display_tz):
-    """
-    Page Name: Sensor Status
-    Strictly locked to: project_registry, master_data_view_v2, and manual_rejections.
-    """
-    # 1. HEADER LOGIC
-    p_meta = st.session_state.get('project_metadata')
-    if not p_meta or selected_project == "All Projects":
-        st.info("💡 Please select a specific project in the sidebar to view sensor health.")
-        return
+def get_arrow(cur, prev):
+    if pd.isnull(cur) or pd.isnull(prev): return "N/A"
+    d = cur - prev
+    return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
 
-    p_name = p_meta.get('ProjectName', selected_project)
-    f_date = p_meta.get('Date_Freezedown')
-    st.title(f"❄️ {p_name}")
-    
-    if pd.notnull(f_date):
-        days = (pd.Timestamp.now(tz=display_tz).date() - pd.to_datetime(f_date).date()).days
-        st.markdown(f"## 🗓️ Day **{max(0, days)}** of Freezedown")
-    st.divider()
-
-    # --- THE FIX: Extract Job Number and Phase for accurate v2 querying ---
-    job_num = str(selected_project).split('-')[0].strip()
-    
-    import re
-    phase_match = re.search(r'(?i)Phase\s*(\d+)', selected_project)
-    phase_sql = ""
-    if phase_match:
-        target_phase = phase_match.group(1)
-        phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{target_phase}'"
-        st.caption(f"🎯 Auto-filtered to **Phase {target_phase}**")
-
-    # --- NEW FIX: Dynamic Status Filter ---
-    # If the active project is the Office, show all test/inventory nodes EXCEPT Archived
-    if 'OFFICE' in job_num.upper():
-        status_sql = """
-            AND UPPER(COALESCE(CAST(m.SensorStatus AS STRING), '')) != 'ARCHIVED'
-            AND UPPER(COALESCE(CAST(m.Location AS STRING), '')) != 'ARCHIVED'
-        """
-    else:
-        # Otherwise, only allow active field and diagnostic nodes
-        status_sql = "AND UPPER(CAST(m.SensorStatus AS STRING)) IN ('ON PROJECT', 'DIAGNOSTIC')"
-
-    # 2. TELEMETRY & COVERAGE QUERY (Uses updated master_data_view_v2)
-    query = f"""
-        WITH BaseReporting AS (
-            SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
-            FROM `{MASTER_VIEW}` m
-            WHERE m.Project LIKE CONCAT(@job_num, '%') 
-              {phase_sql}
-              AND m.NodeNum IS NOT NULL
-              {status_sql}
-        ),
-        GapAnalysis AS (
-            SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
-            FROM BaseReporting
-        ),
-        HistoricalStats AS (
-            SELECT 
-                NodeNum, Location, Bank, Depth,
-                MAX(timestamp) AS last_ping,
-                ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
-                AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
-                
-                -- Pulse Check Flags
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END) as seen_1h_f,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h_f,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h_f,
-
-                -- Hourly Coverage Calculation
-                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
-                (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d,
-
-                -- Extremes & Gaps
-                MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
-                MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
-                MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d
-            FROM GapAnalysis 
-            GROUP BY NodeNum, Location, Bank, Depth
-        )
-        SELECT * FROM HistoricalStats
-    """
-
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)]
+# =============================================================================
+# SHINY UI MODULE
+# =============================================================================
+@module.ui
+def sensors_ui():
+    """Defines the visual layout for the Sensor Status page."""
+    return ui.div(
+        ui.output_ui("header_ui"),
+        ui.hr(),
+        
+        ui.h3("📍 Location Performance Summary"),
+        ui.output_ui("summary_table_ui"),
+        
+        ui.hr(),
+        ui.h3("🔍 Detailed Sensor Audit"),
+        ui.output_ui("audit_filter_ui"),
+        ui.output_data_frame("audit_table_df"),
+        
+        ui.hr(),
+        ui.h3("📋 Hardware Integrity & Connectivity"),
+        ui.output_ui("hardware_integrity_ui")
     )
-    try:
-        df = client.query(query, job_config=job_config).to_dataframe()
-        if df.empty:
-            st.warning("No data found in master_data_view_v2 for this project.")
-            return
 
-        # 3. STATUS & LAG CALCULATIONS
-        now_local = pd.Timestamp.now(tz=display_tz)
-        def get_lag(ts):
-            if pd.isnull(ts): return 999.0
-            ts_aware = ts if ts.tzinfo else ts.tz_localize('UTC')
-            return (now_local - ts_aware.tz_convert(display_tz)).total_seconds() / 3600
+# =============================================================================
+# SHINY SERVER MODULE
+# =============================================================================
+@module.server
+def sensors_server(input, output, session, client, selected_project, project_metadata, unit_mode, unit_label, display_tz):
+    """Handles reactive database fetching and table rendering for Sensor Status."""
+    
+    # --- 1. CORE DATA QUERY ---
+    @reactive.Calc
+    def get_telemetry_data():
+        proj = selected_project() if callable(selected_project) else selected_project
+        if not proj or proj == "All Projects" or client is None:
+            return pd.DataFrame()
 
-        df['last_seen_hrs'] = df['last_ping'].apply(get_lag)
+        job_num = str(proj).split('-')[0].strip()
+        
+        phase_match = re.search(r'(?i)Phase\s*(\d+)', proj)
+        phase_sql = f"AND TRIM(CAST(m.Phase AS STRING)) = '{phase_match.group(1)}'" if phase_match else ""
 
-        # 4. FORMATTING HELPERS
-        def get_status_icon(hrs):
-            if hrs == float('inf') or hrs >= 999.0: return "❌ Never"
-            if hrs <= 1.0: return f"🟢 {hrs:.1f}h"
-            if hrs <= 6.0: return f"🟠 {hrs:.1f}h"
-            return f"🔴 {hrs:.1f}h"
+        if 'OFFICE' in job_num.upper():
+            status_sql = """
+                AND UPPER(COALESCE(CAST(m.SensorStatus AS STRING), '')) != 'ARCHIVED'
+                AND UPPER(COALESCE(CAST(m.Location AS STRING), '')) != 'ARCHIVED'
+            """
+        else:
+            status_sql = "AND UPPER(CAST(m.SensorStatus AS STRING)) IN ('ON PROJECT', 'DIAGNOSTIC')"
 
-        def fmt_t(val):
-            if pd.isnull(val): return "N/A"
-            v = (val - 32) * 5/9 if unit_mode == "Celsius" else val
-            return f"{v:.1f}{unit_label}"
+        query = f"""
+            WITH BaseReporting AS (
+                SELECT m.NodeNum, m.timestamp, m.temperature, m.Location, m.Bank, m.Depth
+                FROM `{MASTER_VIEW}` m
+                WHERE m.Project LIKE CONCAT(@job_num, '%') 
+                  {phase_sql}
+                  AND m.NodeNum IS NOT NULL
+                  {status_sql}
+            ),
+            GapAnalysis AS (
+                SELECT *, LAG(timestamp) OVER (PARTITION BY NodeNum ORDER BY timestamp) AS prev_ts
+                FROM BaseReporting
+            ),
+            HistoricalStats AS (
+                SELECT 
+                    NodeNum, Location, Bank, Depth,
+                    MAX(timestamp) AS last_ping,
+                    ARRAY_AGG(temperature ORDER BY timestamp DESC LIMIT 1)[OFFSET(0)] AS current_temp,
+                    AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN temperature END) as avg_1h,
+                    AVG(CASE WHEN timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 25 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) as avg_24h,
+                    MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN 1 ELSE 0 END) as seen_1h_f,
+                    MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) THEN 1 ELSE 0 END) as seen_6h_f,
+                    MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN 1 ELSE 0 END) as seen_24h_f,
+                    (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
+                    (COUNT(DISTINCT CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 168 HOUR) THEN TIMESTAMP_TRUNC(timestamp, HOUR) END) / 168.0) * 100 as coverage_7d,
+                    MIN(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS low_24h,
+                    MAX(CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN temperature END) AS high_24h,
+                    MAX(TIMESTAMP_DIFF(timestamp, prev_ts, HOUR)) AS max_gap_7d
+                FROM GapAnalysis 
+                GROUP BY NodeNum, Location, Bank, Depth
+            )
+            SELECT * FROM HistoricalStats
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("job_num", "STRING", job_num)])
+        
+        try:
+            df = client.query(query, job_config=job_config).to_dataframe()
+            if df.empty: return pd.DataFrame()
+            
+            tz = display_tz() if callable(display_tz) else display_tz
+            now_local = pd.Timestamp.now(tz=tz)
+            
+            def get_lag(ts):
+                if pd.isnull(ts): return 999.0
+                ts_aware = ts if ts.tzinfo else ts.tz_localize('UTC')
+                return (now_local - ts_aware.tz_convert(tz)).total_seconds() / 3600
 
-        def get_arrow(cur, prev):
-            if pd.isnull(cur) or pd.isnull(prev): return "N/A"
-            d = cur - prev
-            return f"🔺 +{d:.1f}" if d > 0.1 else f"🔹 {d:.1f}" if d < -0.1 else "➡️ 0.0"
+            df['last_seen_hrs'] = df['last_ping'].apply(get_lag)
+            return df
+        except Exception:
+            return pd.DataFrame()
 
-        # 5. LOCATION PERFORMANCE SUMMARY
-        st.subheader("📍 Location Performance Summary")
+    # --- 2. HEADER RENDER ---
+    @output
+    @render.ui
+    def header_ui():
+        proj = selected_project() if callable(selected_project) else selected_project
+        p_meta = project_metadata() if callable(project_metadata) else project_metadata
+        
+        if not p_meta or proj == "All Projects":
+            return ui.p("💡 Please select a specific project in the sidebar to view sensor health.", class_="text-info")
+            
+        p_name = p_meta.get('ProjectName', proj)
+        f_date = p_meta.get('Date_Freezedown')
+        
+        header_blocks = [ui.h2(f"❄️ {p_name}")]
+        if pd.notnull(f_date):
+            tz = display_tz() if callable(display_tz) else display_tz
+            days = (pd.Timestamp.now(tz=tz).date() - pd.to_datetime(f_date).date()).days
+            header_blocks.append(ui.h4(ui.markdown(f"🗓️ Day **{max(0, days)}** of Freezedown")))
+            
+        return ui.div(*header_blocks)
+
+    # --- 3. SUMMARY TABLE RENDER ---
+    @output
+    @render.ui
+    def summary_table_ui():
+        df = get_telemetry_data()
+        if df.empty: return ui.p("No data found in master view for this project.", class_="text-warning")
+        
+        u_mode = unit_mode() if callable(unit_mode) else unit_mode
+        u_label = unit_label() if callable(unit_label) else unit_label
         
         summary_rows = []
         for loc, loc_group in df.groupby('Location'):
-            min_hours_lag = loc_group['last_seen_hrs'].min()
-            max_hours_lag = loc_group['last_seen_hrs'].max()
-            
             summary_rows.append({
                 'Location': loc,
                 'Total Nodes': int(len(loc_group)),
@@ -164,47 +181,55 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 'Seen 24h': int(loc_group['seen_24h_f'].sum()),
                 '24h Coverage': f"{loc_group['coverage_24h'].mean():.1f}%",
                 '7d Coverage': f"{loc_group['coverage_7d'].mean():.1f}%",
-                'Avg Temp': fmt_t(loc_group['current_temp'].mean()),
-                'Low 24h': fmt_t(loc_group['low_24h'].min()),
-                'High 24h': fmt_t(loc_group['high_24h'].max()),
-                'Best Seen': get_status_icon(min_hours_lag),
-                'Worst Seen': get_status_icon(max_hours_lag)
+                'Avg Temp': fmt_temp(loc_group['current_temp'].mean(), u_mode, u_label),
+                'Low 24h': fmt_temp(loc_group['low_24h'].min(), u_mode, u_label),
+                'High 24h': fmt_temp(loc_group['high_24h'].max(), u_mode, u_label),
+                'Best Seen': get_status_icon(loc_group['last_seen_hrs'].min()),
+                'Worst Seen': get_status_icon(loc_group['last_seen_hrs'].max())
             })
             
         summary_df = pd.DataFrame(summary_rows)
 
+        # Apply CSS styling directly to Pandas and output as HTML
         def style_missing_counters(val_df):
             canvas = pd.DataFrame('', index=val_df.index, columns=val_df.columns)
             target_cols = ['Seen 1h', 'Seen 6h', 'Seen 24h']
-            
             for idx in val_df.index:
                 total = val_df.loc[idx, 'Total Nodes']
                 for col in target_cols:
                     seen = val_df.loc[idx, col]
                     missing = total - seen
-                    
-                    if missing == 0:
-                        bg_style = "background-color: #d1fae5; color: #065f46; font-weight: bold;"
-                    elif 1 <= missing <= 3:
-                        bg_style = "background-color: #bbf7d0; color: #14532d; font-weight: bold;"
-                    elif 4 <= missing <= 6:
-                        bg_style = "background-color: #fef08a; color: #713f12; font-weight: bold;"
-                    elif 7 <= missing <= 10:
-                        bg_style = "background-color: #fed7aa; color: #7c2d12; font-weight: bold;"
-                    else:
-                        bg_style = "background-color: #fca5a5; color: #7f1d1d; font-weight: bold;"
-                        
+                    if missing == 0: bg_style = "background-color: #d1fae5; color: #065f46; font-weight: bold;"
+                    elif 1 <= missing <= 3: bg_style = "background-color: #bbf7d0; color: #14532d; font-weight: bold;"
+                    elif 4 <= missing <= 6: bg_style = "background-color: #fef08a; color: #713f12; font-weight: bold;"
+                    elif 7 <= missing <= 10: bg_style = "background-color: #fed7aa; color: #7c2d12; font-weight: bold;"
+                    else: bg_style = "background-color: #fca5a5; color: #7f1d1d; font-weight: bold;"
                     canvas.loc[idx, col] = bg_style
             return canvas
 
-        st.dataframe(summary_df.style.apply(style_missing_counters, axis=None), use_container_width=True, hide_index=True)
+        styled_html = summary_df.style.apply(style_missing_counters, axis=None).hide(axis='index').to_html(classes="table table-bordered table-sm")
+        return ui.HTML(styled_html)
 
-        # 6. DETAILED SENSOR AUDIT
-        st.divider()
-        st.subheader("🔍 Detailed Sensor Audit")
+    # --- 4. DETAILED AUDIT SECTION ---
+    @output
+    @render.ui
+    def audit_filter_ui():
+        df = get_telemetry_data()
+        if df.empty: return ui.HTML("")
+        locs = ["--- All ---"] + sorted(df['Location'].unique())
+        return ui.input_select("audit_loc_filter", "Filter Audit by Location:", locs)
+
+    @output
+    @render.data_frame
+    def audit_table_df():
+        df = get_telemetry_data()
+        if df.empty: return pd.DataFrame()
         
-        selected_loc = st.selectbox("Filter Audit by Location:", ["--- All ---"] + sorted(df['Location'].unique()))
-        audit_df = df.copy() if selected_loc == "--- All ---" else df[df['Location'] == selected_loc]
+        filter_val = input.audit_loc_filter() if hasattr(input, 'audit_loc_filter') else "--- All ---"
+        audit_df = df.copy() if filter_val == "--- All ---" else df[df['Location'] == filter_val]
+        
+        u_mode = unit_mode() if callable(unit_mode) else unit_mode
+        u_label = unit_label() if callable(unit_label) else unit_label
         
         rows = []
         for _, r in audit_df.sort_values(['Location', 'Depth', 'Bank']).iterrows():
@@ -214,128 +239,85 @@ def render_sensor_status(client, selected_project, unit_label, unit_mode, displa
                 "Position": f"{r['Depth']}ft" if pd.notnull(r['Depth']) else f"Bank {r['Bank']}",
                 "Last Seen": get_status_icon(r['last_seen_hrs']),
                 "24 hour coverage": f"{r['coverage_24h']:.1f}%",
-                "Current Temp": fmt_t(r['current_temp']),
+                "Current Temp": fmt_temp(r['current_temp'], u_mode, u_label),
                 "Change for 1 hr": get_arrow(r['current_temp'], r['avg_1h']),
                 "Change for 24 hr": get_arrow(r['current_temp'], r['avg_24h']),
-                "24 hr high": fmt_t(r['high_24h']),
-                "24 hour low": fmt_t(r['low_24h'])
+                "24 hr high": fmt_temp(r['high_24h'], u_mode, u_label),
+                "24 hour low": fmt_temp(r['low_24h'], u_mode, u_label)
             })
-        
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        return render.DataGrid(pd.DataFrame(rows))
 
-    except Exception as e:
-        st.error(f"Sensor Status Error: {e}")
+    # --- 5. HARDWARE INTEGRITY RENDER ---
+    @output
+    @render.ui
+    def hardware_integrity_ui():
+        proj = selected_project() if callable(selected_project) else selected_project
+        if not proj or proj == "All Projects" or client is None: return ui.HTML("")
 
-def render_hardware_integrity_table(client, selected_project, unit_mode, unit_label, target_registry):
-    """Renders a detailed table showing connectivity, coverage, and recent activity sorted by latency."""
-    st.subheader("📋 Hardware Integrity & Connectivity")
-    
-    query = f"""
-        SELECT 
-            n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus,
-            MAX(m.timestamp) as last_ping,
-            ARRAY_AGG(m.temperature ORDER BY m.timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp,
-            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as pings_1h,
-            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
-            COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
-            (COUNT(DISTINCT CASE 
-                WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) 
-                -- standard hour truncations used inside manual rejection tables
-                THEN TIMESTAMP_TRUNC(m.timestamp, HOUR) 
-             END) / 24.0) * 100 as coverage_24h,
-            AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
-            AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev
-        FROM `{target_registry}` n
-        LEFT JOIN `{PROJECT_ID}.{DATASET_ID}.master_data_view_v2` m 
-          ON n.NodeNum = m.NodeNum AND m.NodeNum IS NOT NULL
-        WHERE n.Project = @proj_id AND (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
-        GROUP BY 1, 2, 3, 4, 5
-    """
-    
-    try:
-        df = client.query(query, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", selected_project)]
-        )).to_dataframe()
-    except Exception as e:
-        st.error(f"Hardware Table Query Failed: {e}")
-        return
-
-    if df.empty: 
-        st.info("No active nodes found for connectivity table.")
-        return
-
-    now_utc = pd.Timestamp.now(tz='UTC')
-
-    def row_processor(row):
-        ping = row['last_ping']
-        if pd.isnull(ping):
-            hours_hidden = float('inf')
-            txt = "❌ Never"
-            style = "background-color: #d1d5db; color: #1f2937;" 
-        else:
-            ts = ping if ping.tzinfo else ping.tz_localize('UTC')
-            diff_mins = (now_utc - ts).total_seconds() / 60.0
-            hours_hidden = diff_mins / 60.0
+        query = f"""
+            SELECT 
+                n.NodeNum, n.Location, n.Bank, n.Depth, n.SensorStatus,
+                MAX(m.timestamp) as last_ping,
+                ARRAY_AGG(m.temperature ORDER BY m.timestamp DESC LIMIT 1)[OFFSET(0)] as last_temp,
+                COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)) as pings_1h,
+                COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)) as pings_6h,
+                COUNTIF(m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)) as pings_24h,
+                (COUNT(DISTINCT CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) THEN TIMESTAMP_TRUNC(m.timestamp, HOUR) END) / 24.0) * 100 as coverage_24h,
+                AVG(CASE WHEN m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_now,
+                AVG(CASE WHEN m.timestamp BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR) AND TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) THEN m.temperature END) as avg_1h_prev
+            FROM `{NODE_REGISTRY_TABLE}` n
+            LEFT JOIN `{MASTER_VIEW}` m ON n.NodeNum = m.NodeNum AND m.NodeNum IS NOT NULL
+            WHERE n.Project = @proj_id AND (n.End_Date IS NULL OR TRIM(CAST(n.End_Date AS STRING)) = '')
+            GROUP BY 1, 2, 3, 4, 5
+        """
+        try:
+            df = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("proj_id", "STRING", proj)])).to_dataframe()
+            if df.empty: return ui.p("No active nodes found for connectivity table.", class_="text-info")
             
-            if hours_hidden < 1.0:
-                txt = f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"
-                style = "background-color: #d1fae5; color: #065f46;" 
-            elif 1.0 <= hours_hidden <= 6.0:
-                txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fef08a; color: #854d0e;" 
-            elif 6.0 < hours_hidden <= 12.0:
-                txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fed7aa; color: #9a3412;" 
-            elif 12.0 < hours_hidden <= 24.0:
-                txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #fca5a5; color: #991b1b;" 
-            else:
-                txt = f"{hours_hidden:.1f}h ago"
-                style = "background-color: #d1d5db; color: #1f2937;" 
-        
-        pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
-        trend = get_trend_arrow(row['avg_now'], row['avg_1h_prev'])
-        
-        return pd.Series([txt, style, pos, trend, hours_hidden])
+            now_utc = pd.Timestamp.now(tz='UTC')
+            u_mode = unit_mode() if callable(unit_mode) else unit_mode
+            u_label = unit_label() if callable(unit_label) else unit_label
 
-    df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
-    df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
-    df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
+            def row_processor(row):
+                ping = row['last_ping']
+                if pd.isnull(ping):
+                    hours_hidden = float('inf')
+                    txt, style = "❌ Never", "background-color: #d1d5db; color: #1f2937;" 
+                else:
+                    ts = ping if ping.tzinfo else ping.tz_localize('UTC')
+                    diff_mins = (now_utc - ts).total_seconds() / 60.0
+                    hours_hidden = diff_mins / 60.0
+                    
+                    if hours_hidden < 1.0: txt, style = (f"{int(diff_mins)}m ago" if diff_mins >= 1.0 else "Just now"), "background-color: #d1fae5; color: #065f46;" 
+                    elif 1.0 <= hours_hidden <= 6.0: txt, style = f"{hours_hidden:.1f}h ago", "background-color: #fef08a; color: #854d0e;" 
+                    elif 6.0 < hours_hidden <= 12.0: txt, style = f"{hours_hidden:.1f}h ago", "background-color: #fed7aa; color: #9a3412;" 
+                    elif 12.0 < hours_hidden <= 24.0: txt, style = f"{hours_hidden:.1f}h ago", "background-color: #fca5a5; color: #991b1b;" 
+                    else: txt, style = f"{hours_hidden:.1f}h ago", "background-color: #d1d5db; color: #1f2937;" 
+                
+                pos = f"{row['Depth']}ft" if (pd.notnull(row['Depth']) and row['Depth'] != 0) else f"Bank {row['Bank']}"
+                trend = get_arrow(row['avg_now'], row['avg_1h_prev'])
+                return pd.Series([txt, style, pos, trend, hours_hidden])
 
-    display_df = pd.DataFrame({
-        "Node ID": df['NodeNum'],
-        "Location": df['Location'],
-        "Position": df['Pos_Label'],
-        "Last Seen": df['Seen_Text'],
-        "24h Coverage": df['coverage_24h'], 
-        "1h Change": df['Trend'],
-        "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, unit_mode, unit_label)),
-        "1h Pings": df['pings_1h'],
-        "6h Pings": df['pings_6h'],
-        "24h Pings": df['pings_24h']
-    })
+            df[['Seen_Text', 'Seen_Style', 'Pos_Label', 'Trend', 'hours_hidden']] = df.apply(row_processor, axis=1)
+            df['hours_hidden'] = pd.to_numeric(df['hours_hidden'], errors='coerce').fillna(float('inf'))
+            df = df.sort_values(by='hours_hidden', ascending=True).reset_index(drop=True)
 
-    def diagnostic_styler(data):
-        style_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        for i in data.index:
-            style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
-            if df.loc[i, 'SensorStatus'] == 'Diagnostic':
-                style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
-        return style_df
+            display_df = pd.DataFrame({
+                "Node ID": df['NodeNum'], "Location": df['Location'], "Position": df['Pos_Label'],
+                "Last Seen": df['Seen_Text'], "24h Coverage": df['coverage_24h'].apply(lambda x: f"{x:.1f}%"), 
+                "1h Change": df['Trend'], "Last Temp": df['last_temp'].apply(lambda x: fmt_temp(x, u_mode, u_label)),
+                "1h Pings": df['pings_1h'], "6h Pings": df['pings_6h'], "24h Pings": df['pings_24h']
+            })
 
-    st.dataframe(
-        display_df.style.apply(diagnostic_styler, axis=None), 
-        use_container_width=True, 
-        hide_index=True,
-        column_config={
-            "24h Coverage": st.column_config.ProgressColumn(
-                "24h Coverage", 
-                format="%.1f%%", 
-                min_value=0, 
-                max_value=100
-            ),
-            "1h Pings": st.column_config.NumberColumn("1h Pings", format="%d"),
-            "6h Pings": st.column_config.NumberColumn("6h Pings", format="%d"),
-            "24h Pings": st.column_config.NumberColumn("24h Pings", format="%d"),
-        }
-    )
+            def diagnostic_styler(data):
+                style_df = pd.DataFrame('', index=data.index, columns=data.columns)
+                for i in data.index:
+                    style_df.loc[i, 'Last Seen'] = df.loc[i, 'Seen_Style']
+                    if df.loc[i, 'SensorStatus'] == 'Diagnostic':
+                        style_df.loc[i, 'Node ID'] = 'background-color: #ff4b4b; color: white; font-weight: bold;'
+                return style_df
+
+            styled_html = display_df.style.apply(diagnostic_styler, axis=None).hide(axis='index').to_html(classes="table table-bordered table-hover")
+            return ui.HTML(styled_html)
+        except Exception as e:
+            return ui.p(f"Hardware Table Query Failed: {e}", class_="text-danger")
