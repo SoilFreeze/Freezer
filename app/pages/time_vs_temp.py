@@ -153,7 +153,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
                 f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
             )
-            if not fig: continue
+            if fig:
             
             # Export to HTML string natively to avoid dynamic endpoint limits
             fig_html = fig.to_html(full_html=False, include_plotlyjs=False)
