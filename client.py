@@ -1,7 +1,7 @@
 from shiny import App, render, reactive, ui
+from shinywidgets import output_widget, render_plotly
 import pandas as pd
 import os
-import html # <--- NEW: Used to safely escape the HTML for the iframe
 
 # Import your decoupled backend logic
 from app.pages.summary import get_summary_data
@@ -9,28 +9,9 @@ from app.pages.depth import generate_depth_figures
 from app.data.processor import get_universal_portal_data, get_bq_client
 from app.components.charts import build_high_speed_graph
 from app.components.charts import build_cropped_site_map
-from urllib.parse import parse_qs
 
-def server(input, output, session):
-    @reactive.Calc
-    def current_job():
-        # 1. Reactively check for URL query parameters
-        search = session.clientdata.url_search()
-        if search:
-            query_params = parse_qs(search.lstrip('?'))
-            for key in ['job', 'job_number', 'project']:
-                if key in query_params:
-                    val = query_params[key][0].strip()
-                    if val:
-                        # Automatically sync the sidebar text box to match the URL
-                        try:
-                            ui.update_text("job_number", value=val)
-                        except Exception:
-                            pass
-                        return val
-                        
-        # 2. Fall back to the manual sidebar text box if no URL parameter exists
-        return input.job_number().strip()
+# Define a generous maximum number of charts to support per project
+MAX_CHARTS = 25
 
 # ===============================================================
 # 1. SHINY UI DEFINITION
@@ -43,23 +24,20 @@ app_sidebar = ui.sidebar(
 
 app_ui = ui.page_sidebar(
     app_sidebar, 
-    
     ui.output_ui("dynamic_global_header"),
-    
     ui.navset_card_underline(
         ui.nav_panel(
             "🏠 Summary", 
             ui.h3("🌐 24 hour Thermal Summary", style="margin-top: 10px; margin-bottom: 25px; color: #2c3e50; font-weight: 500;"),
             ui.output_ui("dynamic_summary_cards")
         ),
-        ui.nav_panel("📈 Timeline Analysis", ui.output_ui("dynamic_timeline_charts")),
-        ui.nav_panel("📏 Depth Profile", ui.output_ui("dynamic_depth_charts")),
+        ui.nav_panel("📈 Timeline Analysis", ui.output_ui("dynamic_timeline_ui")),
+        ui.nav_panel("📏 Depth Profile", ui.output_ui("dynamic_depth_ui")),
         ui.nav_panel("🗺️ As Built", ui.output_ui("dynamic_as_builts")),
         id="main_tabs"
     ),
-    
     title="SoilFreeze Client Portal",
-    fillable=False  # <--- THE FIX: This stops the weird scrolling box behavior!
+    fillable=False 
 )
 
 # ===============================================================
@@ -67,18 +45,22 @@ app_ui = ui.page_sidebar(
 # ===============================================================
 def server(input, output, session):
     
+    # --- FIX 1: Safely grab the input without crashing the server ---
     @reactive.Calc
     def current_job():
-        return input.job_number().strip()
+        # Only return the value if the text box has been populated
+        return input.job_number().strip() if input.job_number() else ""
 
     # --- GLOBAL HEADER ---
+    @output
     @render.ui
     def dynamic_global_header():
         job = current_job()
         if not job:
             return ui.h2("🌐 Global Active Project Summary")
             
-        active_projs, _, tel_df, err = get_summary_data(selected_project=job, show_archived_opt=False)
+        client = get_bq_client()
+        active_projs, _, tel_df, err = get_summary_data(client, selected_project=job, show_archived=False)
         
         if err or active_projs is None or active_projs.empty:
             return ui.h1(f"📊 Project: {job}")
@@ -119,29 +101,27 @@ def server(input, output, session):
             <h1 style="display: flex; align-items: center; gap: 10px; color: #343a40; font-weight: 700; font-size: 2.8rem; margin-bottom: 25px;">
                 📊 {proj_name}
             </h1>
-            
             <div style="background-color: #f0f8ff; border: 1px solid #cce5ff; padding: 18px 20px; border-radius: 5px; margin-bottom: 25px; display: flex; align-items: center; gap: 10px;">
                 <span style="background-color: #28a745; color: white; border-radius: 3px; padding: 2px 6px; font-size: 0.8em;">✅</span>
                 <span style="color: #004085;"><b>Official Data Status:</b> Records approved through <b>{latest_str}</b>.</span>
             </div>
-            
             {freeze_html}
             <hr style="margin-top: 15px; margin-bottom: 25px; border-top: 1px solid #dee2e6;">
         """)
 
     # --- TAB 1: SUMMARY ENGINE ---
+    @output
     @render.ui
     def dynamic_summary_cards():
         job = current_job()
         if not job:
             return ui.p("Please provide a job number to view the summary.", style="color: gray; font-style: italic;")
             
-        _, _, tel_df, err = get_summary_data(selected_project=job, show_archived_opt=False)
+        client = get_bq_client()
+        _, _, tel_df, err = get_summary_data(client, selected_project=job, show_archived=False)
         
-        if err:
-            return ui.div(f"Error loading summary: {err}", style="color: red;")
-        if tel_df is None or tel_df.empty:
-            return ui.div(f"No recent telemetry found for job: {job} in the last 48 hours.", style="color: orange;")
+        if err: return ui.div(f"Error loading summary: {err}", style="color: red;")
+        if tel_df is None or tel_df.empty: return ui.div(f"No recent telemetry found for job: {job} in the last 48 hours.", style="color: orange;")
             
         is_amb_col = tel_df['Location'].astype(str).str.upper() == 'AMBIENT'
         is_tp_col = tel_df['Depth'].notnull() & (tel_df['Depth'].astype(str).str.strip() != '') & ~is_amb_col
@@ -174,7 +154,7 @@ def server(input, output, session):
             h_str = f"{high_24:.1f}°F" if pd.notnull(high_24) else "N/A"
             lo_str = f"{low_24:.1f}°F" if pd.notnull(low_24) else "N/A"
             
-            card_html = f"""
+            cols.append(ui.HTML(f"""
             <div style="font-family: sans-serif;">
                 <h3 style="margin-bottom: 20px; color: #343a40; font-weight: 500;">{title}</h3>
                 <div style="color: #6c757d; font-size: 0.9rem; margin-bottom: 8px;">Avg (Latest)</div>
@@ -184,180 +164,165 @@ def server(input, output, session):
                     <span><b>Low (24h):</b> {lo_str}</span>
                 </div>
             </div>
-            """
-            cols.append(ui.HTML(card_html))
+            """))
             
         return ui.layout_column_wrap(*cols, width=1/4, gap="30px")
 
-    # --- TAB 2: TIMELINE ANALYSIS ENGINE ---
-    @render.ui
-    def dynamic_timeline_charts():
+    # --- TAB 2: NATIVE TIMELINE CHARTS ---
+    # Fetch database payload exactly once to feed all charts
+    @reactive.Calc
+    def shared_timeline_data():
         job = current_job()
-        if not job:
-            return ui.p("Please provide a job number.", style="color: gray; font-style: italic;")
-            
+        if not job: return None, None, []
+        
         df = get_universal_portal_data(job, lookback_days=42, is_summary_page=False, show_masked=False, show_baddata=False)
-        if df is None or df.empty:
-            return ui.p("No timeline data found for this project.", style="color: orange;")
-            
         client = get_bq_client()
-        unique_locations = [loc for loc in df['Location'].dropna().unique() if 'AMBIENT' not in str(loc).upper() and str(loc).strip().upper() != 'UNASSIGNED']
         
-        if not unique_locations:
-            return ui.p("No assigned locations available to chart.", style="color: gray;")
-            
-        start_date = df['timestamp'].min()
-        end_date = df['timestamp'].max()
-        job_root = str(job).split('-')[0].strip()
-        
-        # --- Fetch map data robustly ---
         df_all_locs = pd.DataFrame()
         try:
             from app.utils.config import PROJECT_ID, DATASET_ID
-            map_query = f"""
-                SELECT CAST(Project AS STRING) as Project, CAST(Location AS STRING) as Location, Map_X, Map_Y, Image_Name 
-                FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` 
-                WHERE CAST(Project AS STRING) = '{job_root}'
-            """
+            map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job}'"
             df_all_locs = client.query(map_query).to_dataframe()
-            
             if not df_all_locs.empty and 'Location' in df_all_locs.columns:
                 df_all_locs['Location'] = df_all_locs['Location'].astype(str).str.strip().str.upper()
                 df_all_locs['Project'] = df_all_locs['Project'].astype(str).str.strip()
-        except Exception as e:
-            print(f"Warning: Map data fetch failed: {e}")
-            
-        as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+        except: pass
         
+        if df is not None and not df.empty:
+            valid_locs = sorted([loc for loc in df['Location'].dropna().unique() if 'AMBIENT' not in str(loc).upper() and str(loc).strip().upper() != 'UNASSIGNED'])
+            return df, df_all_locs, valid_locs
+        return None, None, []
+
+    @output
+    @render.ui
+    def dynamic_timeline_ui():
+        df, _, valid_locs = shared_timeline_data()
+        if df is None or not valid_locs:
+            return ui.p("No timeline data found for this project.", style="color: orange;")
+
         ui_elements = []
-        for loc in sorted(unique_locations):
-            loc_data = df[df['Location'] == loc]
-            if loc_data.empty: continue
-            
-            fig = build_high_speed_graph(
-                client=client,  
-                df=loc_data, 
-                title=f"Thermal Trends: {loc}",
-                start_view=start_date, 
-                end_view=end_date, 
-                active_refs=[(32.0, "Freezing")],
-                unit_mode="Fahrenheit",
-                unit_label="°F",
-                display_tz="US/Pacific",
-                curve_id=f"{job}-{loc}",
-                show_elevation=False
-            )
-            
-            if fig:
-                # 1. Prepare Main Chart
-                plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
-                escaped_html = html.escape(plot_html)
-                main_chart_iframe = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
-                
-                # Default to full-width chart
-                content_html = main_chart_iframe
-                
-                # 2. Check Map Eligibility (Only allow Temp Pipes starting with 'T')
-                loc_clean = str(loc).strip().upper()
-                is_temp_pipe = loc_clean.startswith('T')
-                
-                if is_temp_pipe and not df_all_locs.empty and 'Location' in df_all_locs.columns:
-                    if loc_clean in df_all_locs['Location'].values:
-                        
-                        map_fig = build_cropped_site_map(job_root, loc_clean, df_all_locs, as_built_path)
-                        
-                        if map_fig:
-                            map_html = map_fig.to_html(full_html=True, include_plotlyjs="cdn")
-                            escaped_map_html = html.escape(map_html)
-                            map_iframe = f'<iframe srcdoc="{escaped_map_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
-                            
-                            # Upgrade to side-by-side flex layout since it's a valid Temp Pipe map!
-                            content_html = f"""
-                            <div style="display: flex; flex-wrap: wrap; gap: 15px; width: 100%;">
-                                <div style="flex: 3; min-width: 600px;">
-                                    {main_chart_iframe}
-                                </div>
-                                <div style="flex: 1; min-width: 250px;">
-                                    {map_iframe}
-                                </div>
-                            </div>
-                            """
-                
-                ui_elements.append(
-                    ui.card(
-                        ui.HTML(content_html),
-                        style="margin-bottom: 20px;"
-                    )
+        for i, loc in enumerate(valid_locs):
+            # Render empty containers for the native Plotly charts to populate
+            ui_elements.append(
+                ui.card(
+                    ui.layout_columns(
+                        ui.div(output_widget(f"timeline_chart_{i}")),
+                        ui.div(output_widget(f"timeline_map_{i}")),
+                        col_widths=[9, 3]
+                    ),
+                    style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
                 )
-                
+            )
         return ui.TagList(*ui_elements)
 
+    # Factory Generator to bind charts to their respective native outputs dynamically
+    for i in range(MAX_CHARTS):
+        def make_timeline_chart(index):
+            @output(id=f"timeline_chart_{index}")
+            @render_plotly
+            def _plot():
+                df, map_df, locs = shared_timeline_data()
+                if df is not None and index < len(locs):
+                    loc = locs[index]
+                    loc_data = df[df['Location'] == loc]
+                    client = get_bq_client()
+                    
+                    fig = build_high_speed_graph(
+                        client=client, df=loc_data, title=f"Thermal Trends: {loc}",
+                        start_view=df['timestamp'].min(), end_view=df['timestamp'].max(), 
+                        active_refs=[(32.0, "Freezing")], unit_mode="Fahrenheit", unit_label="°F", 
+                        display_tz="US/Pacific", curve_id=f"{current_job()}-{loc}", show_elevation=False
+                    )
+                    return fig
+                return None
+            return _plot
+            
+        def make_timeline_map(index):
+            @output(id=f"timeline_map_{index}")
+            @render_plotly
+            def _map():
+                df, map_df, locs = shared_timeline_data()
+                if df is not None and index < len(locs):
+                    loc = locs[index]
+                    loc_clean = str(loc).strip().upper()
+                    if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
+                        if loc_clean in map_df['Location'].values:
+                            as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+                            map_fig = build_cropped_site_map(current_job(), loc_clean, map_df, as_built_path)
+                            return map_fig
+                return None
+            return _map
+            
+        make_timeline_chart(i)
+        make_timeline_map(i)
+
     # --- TAB 3: DEPTH PROFILE ENGINE ---
-    @render.ui
-    def dynamic_depth_charts():
+    @reactive.Calc
+    def shared_depth_data():
         job = current_job()
-        if not job:
-            return ui.p("Please provide a job number to view profiles.", style="color: gray; font-style: italic;")
-            
-        figures_dict, chart_label, error_msg = generate_depth_figures(
-            selected_project=job, 
-            unit_label="°F", 
-            display_tz="US/Pacific", 
-            orientation="vertical",
-            lookback_weeks=5,
-            show_masked=False,
-            show_baddata=False,
-            unit_mode="Fahrenheit"
-        )
+        if not job: return {}, ""
         
-        if error_msg:
-            return ui.div(error_msg, style="color: orange;")
-            
+        figures_dict, chart_label, error_msg = generate_depth_figures(
+            selected_project=job, unit_label="°F", display_tz="US/Pacific", 
+            orientation="vertical", lookback_weeks=5, show_masked=False, 
+            show_baddata=False, unit_mode="Fahrenheit"
+        )
+        return figures_dict, chart_label
+
+    @output
+    @render.ui
+    def dynamic_depth_ui():
+        figures_dict, chart_label = shared_depth_data()
+        if not figures_dict:
+            return ui.p("No depth profile data found.", style="color: orange;")
+        
         ui_elements = []
-        for loc, fig in figures_dict.items():
-            
-            plot_html = fig.to_html(full_html=True, include_plotlyjs="cdn")
-            escaped_html = html.escape(plot_html)
-            iframe_tag = f'<iframe srcdoc="{escaped_html}" width="100%" height="800px" style="border:none; overflow:hidden;"></iframe>'
-            
+        for i, loc in enumerate(figures_dict.keys()):
             ui_elements.append(
                 ui.card(
                     ui.card_header(f"📍 Temp vs {chart_label} - {loc}"),
-                    ui.HTML(iframe_tag),
-                    style="margin-bottom: 20px;"
+                    output_widget(f"depth_plot_{i}"),
+                    style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
                 )
             )
-            
         return ui.TagList(*ui_elements)
 
+    # Factory Generator for Depth Charts
+    for i in range(MAX_CHARTS):
+        def make_depth_renderer(index):
+            @output(id=f"depth_plot_{index}")
+            @render_plotly
+            def _plot():
+                figures_dict, _ = shared_depth_data()
+                locs = list(figures_dict.keys())
+                if index < len(locs):
+                    return figures_dict[locs[index]]
+                return None
+            return _plot
+        make_depth_renderer(i)
+
     # --- TAB 4: AS BUILTS ENGINE ---
+    @output
     @render.ui
     def dynamic_as_builts():
         job = current_job()
-        if not job:
-            return ui.p("Please provide a job number to view as-builts.", style="color: gray; font-style: italic;")
+        if not job: return ui.p("Please provide a job number to view as-builts.", style="color: gray; font-style: italic;")
             
         job_root = str(job).split('-')[0].strip()
-        
-        # Use an absolute path to ensure Posit Connect Cloud finds the folder
         as_builts_dir = os.path.join(os.path.dirname(__file__), "as_builts")
         
-        if not os.path.exists(as_builts_dir):
-            return ui.div("As-builts directory not found.", style="color: orange;")
+        if not os.path.exists(as_builts_dir): return ui.div("As-builts directory not found.", style="color: orange;")
             
         found_images = sorted([
             f for f in os.listdir(as_builts_dir) 
             if f.startswith(job_root) and f.lower().endswith(('.png', '.jpg', '.jpeg'))
         ])
         
-        if not found_images:
-            return ui.div("ℹ️ Site plan is currently being processed or has not been assigned.", style="color: gray; font-style: italic;")
+        if not found_images: return ui.div("ℹ️ Site plan is currently being processed or has not been assigned.", style="color: gray; font-style: italic;")
             
         image_elements = []
         for img_name in found_images:
-            # Map the web source URL to the static asset folder we define below
             img_src = f"/as_builts/{img_name}"
-            
             image_elements.append(
                 ui.card(
                     ui.h5(img_name, style="text-align: center; margin-bottom: 15px;"),
@@ -368,7 +333,7 @@ def server(input, output, session):
             
         return ui.TagList(*image_elements)
 
-# Mount the local "as_builts" directory to the "/as_builts" web path so the browser can see the images
+# Route the local "as_builts" directory so the browser can natively load images
 app = App(
     app_ui, 
     server, 
