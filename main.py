@@ -14,7 +14,7 @@ from app.utils.config import PROJECT_ID, DATASET_ID
 # External Page Renders (These will need UI/Server adjustments in the future)
 from app.pages.summary import render_summary_dashboard
 from app.pages.depth import render_depth_charts
-from app.pages.sensors import render_sensor_status
+from app.pages.sensors import sensors_ui, sensors_server
 from app.pages.diagnostics import render_node_diagnostics
 from app.pages.processing import render_data_processing_page
 from app.pages.admin import render_admin_page
@@ -219,7 +219,20 @@ def server(input, output, session):
         elif page == "Depth Charts":
             return ui.h3("Depth Charts Placeholder")
         elif page == "Sensor Status":
-            return ui.h3("Sensor Status Placeholder")
+            return ui.div(
+                sensors_ui("sensors_module")
+            )
+
+        sensors_server(
+            "sensors_module",
+            client=client,
+            selected_project=input.selected_project,
+            project_metadata=project_metadata, # The reactive.Value holding metadata
+            unit_mode=input.unit_toggle,
+            unit_label=unit_label,
+            display_tz=display_tz
+        )
+        
         elif page == "Node Diagnostics":
             return ui.h3("Node Diagnostics Placeholder")
 
