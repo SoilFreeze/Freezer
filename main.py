@@ -14,6 +14,7 @@ from app.pages.admin import admin_ui, admin_server
 from app.pages.processing import processing_ui, processing_server
 from app.pages.sensors import sensors_ui, sensors_server
 from app.pages.diagnostics import diagnostics_ui, diagnostics_server
+from app.pages.summary import summary_ui, summary_server
 
 # =============================================================================
 # 1. UI SETUP & SIDEBAR NAVIGATION
@@ -205,7 +206,7 @@ def server(input, output, session):
         # 1. Global / Admin Pages
         if page in ["Summary", "Data Processing", "Admin Tools"]:
             if page == "Summary":
-                return ui.h3(f"Summary Dashboard Placeholder for {proj}")
+                return ui.div(summary_ui("summary_module")) # <-- Inject here
             
             if not authenticated.get():
                 return ui.div(
@@ -262,7 +263,16 @@ def server(input, output, session):
                        unit_mode=input.unit_toggle, 
                        unit_label=current_unit_label, 
                        global_show_archived=input.global_show_archived)
-
+    
+    summary_server("summary_module", 
+                   client=client, 
+                   selected_project=input.selected_project, 
+                   global_show_archived=input.global_show_archived,
+                   unit_mode=input.unit_toggle, 
+                   unit_label=current_unit_label, 
+                   display_tz=current_display_tz,
+                   global_show_ambient=input.global_show_ambient)
+    
 # =============================================================================
 # GLOBAL APP EXPORT
 # =============================================================================
