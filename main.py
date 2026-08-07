@@ -90,7 +90,8 @@ def server(input, output, session):
     client = get_bq_client()
 
     # --- REACTIVE STATE VARIABLES ---
-    project_metadata = reactive.Value(None)
+    project_metadata = reactive.Value({})
+    proj_df_state = reactive.Value(pd.DataFrame()) # <-- NEW: Safely holds the database query
     authenticated = reactive.Value(False)
 
     @reactive.Calc
@@ -120,11 +121,29 @@ def server(input, output, session):
             proj_df = client.query(proj_q).to_dataframe()
             proj_list = sorted([str(p).strip() for p in proj_df['Project'].unique() if p and str(p).strip().lower() not in ['none', 'nan', 'null', '']])
             
-            # Store full dataframe in session to grab metadata later
-            session.userData['proj_df'] = proj_df
+            # FIX: Store full dataframe in the reactive value instead of session.userData
+            proj_df_state.set(proj_df)
+            
             return ui.input_select("selected_project", "🎯 Active Project", ["All Projects"] + proj_list)
         except Exception as e:
             return ui.p(f"⚠️ Error: {e}", style="color: red;")
+
+    # --- METADATA EXTRACTION LOGIC ---
+    @reactive.Effect
+    def update_project_metadata():
+        """Updates the project_metadata dictionary whenever the project dropdown changes."""
+        if hasattr(input, "selected_project"):
+            proj = input.selected_project()
+            df = proj_df_state.get()
+            
+            if proj and proj != "All Projects" and not df.empty:
+                meta_row = df[df['Project'] == proj]
+                if not meta_row.empty:
+                    project_metadata.set(meta_row.iloc[0].to_dict())
+                else:
+                    project_metadata.set({})
+            else:
+                project_metadata.set({})
 
     # --- DATA AGE PULSE ---
     @output
