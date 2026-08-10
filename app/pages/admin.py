@@ -490,7 +490,43 @@ def admin_server(input, output, session, client, selected_project, display_tz):
 
     @reactive.Effect
     @reactive.event(input.blk_execute_btn)
+    def @reactive.Effect
+    @reactive.event(input.blk_execute_btn)
     def execute_bulk_update():
+        where_clause = constructed_where_clause.get()
+        new_status = input.blk_new_status()
+        
+        if not where_clause or client is None: return
+        
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        rejections_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+        
+        # MERGE ensures we update existing overrides or insert new ones without duplicating
+        merge_q = f"""
+            MERGE `{rejections_table}` T
+            USING (
+                SELECT NodeNum, timestamp, '{new_status}' as new_approve
+                FROM `{view_table}`
+                WHERE {where_clause}
+            ) S
+            ON T.NodeNum = S.NodeNum AND T.timestamp = S.timestamp
+            WHEN MATCHED THEN
+                UPDATE SET approve = S.new_approve
+            WHEN NOT MATCHED THEN
+                INSERT (NodeNum, timestamp, approve)
+                VALUES (S.NodeNum, S.timestamp, S.new_approve)
+        """
+        
+        try:
+            client.query(merge_q).result()
+            ui.notification_show("Successfully logged status overrides to manual_rejections!", type="success", duration=8)
+            
+            # Reset the UI after execution
+            verify_match_count.set(None) 
+            ui.update_checkbox("blk_confirm_check", value=False)
+            
+        except Exception as e:
+            ui.notification_show(f"Override update failed: {e}", type="error", duration=15)lk_update():
         where_clause = constructed_where_clause.get()
         new_status = input.blk_new_status()
         
