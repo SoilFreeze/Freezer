@@ -59,7 +59,7 @@ def admin_ui():
                 ui.output_data_frame("deployment_overview_df")
             ),
             
-            # --- TAB 2: BULK APPROVAL & DATABASE MAINTENANCE ---
+            # --- TAB 2: BULK APPROVAL & CLEANUP ---
             ui.nav_panel("⚡ Bulk Approval",
                 ui.h2("⚡ Bulk Approval and Database Maintenance"),
                 ui.hr(),
@@ -72,28 +72,7 @@ def admin_ui():
                 ui.output_ui("audit_results_ui"),
                 
                 ui.hr(),
-
-                # --- PROJECT DATA ARCHIVAL ---
-                ui.h3("📦 Project Data Archival"),
-                ui.markdown("Automatically move telemetry marked as **'Archived'** in the Node Registry into the permanent `master_data_archive` table, then purge it from all active ingestion tables (including the registry)."),
                 
-                ui.input_action_button("audit_archive_btn", "🔍 Step 1: Audit Ready-to-Archive Data", class_="btn-outline-secondary w-100 mb-3"),
-                
-                ui.output_ui("archive_audit_results_ui"),
-                ui.output_ui("archive_impact_results_ui"), # <-- New Impact Matrix Output
-                ui.hr(),
-                ui.h4("⏳ Rolling Time-Based Archive"),
-                ui.markdown("Sweep all active tables and move any telemetry older than the specified threshold into the permanent archive."),
-                ui.layout_columns(
-                    ui.input_numeric("archive_days_old", "Archive data older than (days):", value=14, min=1), 
-                    ui.input_action_button("run_time_archive_btn", "⏳ Execute Rolling Archive", class_="btn-warning mt-4")
-                ),
-                ui.output_ui("time_archive_impact_results_ui"), # <-- New Impact Matrix Output
-                         
-                ui.h4("🗄️ Current Archive Inventory"),
-                ui.output_data_frame("current_archive_df_ui"),
-                ui.hr(),
-                         
                 # --- BULK APPROVAL AND DATA STATUS CHANGE ---
                 ui.h3("⚡ Bulk Approval and Data Status Change"),
                 
@@ -130,8 +109,38 @@ def admin_ui():
                 ui.input_checkbox("blk_confirm_check", "I authorize updating these data markers to the target parameters specified."),
                 ui.output_ui("blk_execute_btn_ui")
             ),
+
+            # --- TAB 3: DATA ARCHIVAL ---
+            ui.nav_panel("📦 Data Archival",
+                ui.h2("📦 Data Archival Engine"),
+                ui.hr(),
+                
+                # --- PROJECT DATA ARCHIVAL ---
+                ui.h3("🗂️ Project Data Archival"),
+                ui.markdown("Automatically move telemetry marked as **'Archived'** in the Node Registry into the permanent `master_data_archive` table, then purge it from all active ingestion tables (including the registry)."),
+                
+                ui.input_action_button("audit_archive_btn", "🔍 Step 1: Audit Ready-to-Archive Data", class_="btn-outline-secondary w-100 mb-3"),
+                
+                ui.output_ui("archive_audit_results_ui"),
+                ui.output_ui("archive_impact_results_ui"),
+                ui.hr(),
+                
+                # --- ROLLING TIME-BASED ARCHIVE ---
+                ui.h3("⏳ Rolling Time-Based Archive"),
+                ui.markdown("Sweep all active tables and move any telemetry older than the specified threshold into the permanent archive."),
+                ui.layout_columns(
+                    ui.input_numeric("archive_days_old", "Archive data older than (days):", value=14, min=1), 
+                    ui.input_action_button("run_time_archive_btn", "⏳ Execute Rolling Archive", class_="btn-warning mt-4")
+                ),
+                ui.output_ui("time_archive_impact_results_ui"),
+                ui.hr(),
+                
+                # --- CURRENT ARCHIVE INVENTORY ---
+                ui.h4("🗄️ Current Archive Inventory"),
+                ui.output_data_frame("current_archive_df_ui")
+            ),
             
-            # --- TAB 3: DATA RECOVERY ---
+            # --- TAB 4: DATA RECOVERY ---
             ui.nav_panel("📡 Data Recovery",
                 ui.h3("📡 Data Recovery Engine"),
                 ui.p("Extract raw chronological data streams directly from the SensorPush Cloud API architecture."),
@@ -156,13 +165,13 @@ def admin_ui():
                 ui.output_ui("rec_results_ui")
             ),
             
-            # --- TAB 4: PROJECT MASTER ---
+            # --- TAB 5: PROJECT MASTER ---
             ui.nav_panel("⚙️ Project Master",
                 ui.h3("🗄️ Complete Master Project Lifecycle Directory"),
                 ui.output_data_frame("project_master_df")
             ),
             
-            # --- TAB 5: PIPE MAPPER ---
+            # --- TAB 6: PIPE MAPPER ---
             ui.nav_panel("🗺️ Pipe Mapper",
                 ui.h3("🗺️ As-Built Pipe Mapper"),
                 ui.p("Select a site plan to log X/Y pixel coordinates for physical locations."),
@@ -406,7 +415,21 @@ def admin_server(input, output, session, client, selected_project, display_tz):
                 """
                 client.query(consolidation_q).result()
                 
-            ui.notification_show("Consolidation complete! Tables safely averaged and structured.", type="success", duration=10)
+            # --- Clean up orphaned manual rejections ---
+            cleanup_rejections_q = f"""
+                DELETE FROM `{PROJECT_ID}.{DATASET_ID}.manual_rejections` m
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.raw_lord` l 
+                    WHERE UPPER(TRIM(l.NodeNum)) = UPPER(TRIM(m.NodeNum)) AND l.timestamp = m.timestamp
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{PROJECT_ID}.{DATASET_ID}.raw_sensorpush` s 
+                    WHERE UPPER(TRIM(s.NodeNum)) = UPPER(TRIM(m.NodeNum)) AND s.timestamp = m.timestamp
+                )
+            """
+            client.query(cleanup_rejections_q).result()
+                
+            ui.notification_show("Consolidation complete! Tables safely averaged and orphaned rejections purged.", type="success", duration=10)
             
             audit_matrix_df.set(None)
             ui.update_checkbox("audit_confirm_check", value=False)
@@ -414,310 +437,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         except Exception as e:
             ui.notification_show(f"Consolidation failed: {e}", type="error", duration=15)
 
-    # --- 3. Project Data Archival ---
-    archive_audit_df = reactive.Value(None)
-    current_archive_df = reactive.Value(None)
-    
-    # Helper to load current archive inventory
-    def load_archive_inventory():
-        if client is None: return
-        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
-        try:
-            q = f"""
-                SELECT 
-                    Project, 
-                    FORMAT_TIMESTAMP('%Y-%m-%d', MIN(timestamp)) as Start_Date, 
-                    FORMAT_TIMESTAMP('%Y-%m-%d', MAX(timestamp)) as End_Date, 
-                    COUNT(*) as Total_Records 
-                FROM `{archive_table}` 
-                GROUP BY Project 
-                ORDER BY Project DESC
-            """
-            df = client.query(q).to_dataframe()
-            current_archive_df.set(df)
-        except Exception:
-            current_archive_df.set(pd.DataFrame())
-
-    # Load the inventory table on startup
-    @reactive.Effect
-    def init_archive_inventory():
-        load_archive_inventory()
-
-    @output
-    @render.data_frame
-    def current_archive_df_ui():
-        df = current_archive_df.get()
-        if df is not None and not df.empty:
-            # Add commas to the record counts for readability
-            df['Total_Records'] = df['Total_Records'].apply(lambda x: f"{int(x):,}")
-            return render.DataGrid(df, summary=False)
-        return render.DataGrid(pd.DataFrame(columns=["Project", "Start Date", "End Date", "Total Records"]))
-
-    @reactive.Effect
-    @reactive.event(input.audit_archive_btn)
-    def run_archive_audit():
-        if client is None: return
-        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
-        
-        # Look into the Node Registry for Status = 'Archived' and match it to the view
-        audit_q = f"""
-            SELECT 
-                v.Project,
-                FORMAT_TIMESTAMP('%Y-%m-%d', MIN(v.timestamp)) as Start_Date, 
-                FORMAT_TIMESTAMP('%Y-%m-%d', MAX(v.timestamp)) as End_Date, 
-                COUNT(*) as Records_to_Archive
-            FROM `{view_table}` v
-            WHERE EXISTS (
-                SELECT 1 FROM `{NODE_REGISTRY_TABLE}` r
-                WHERE r.NodeNum = v.NodeNum 
-                  AND r.Project = v.Project
-                  AND UPPER(r.Status) = 'ARCHIVED'
-            )
-            GROUP BY v.Project
-            ORDER BY v.Project
-        """
-        try:
-            df = client.query(audit_q).to_dataframe()
-            archive_audit_df.set(df)
-            if df.empty:
-                ui.notification_show("No records found with Status = 'Archived'.", type="warning")
-        except Exception as e:
-            ui.notification_show(f"Archive audit failed: {e}", type="error")
-            archive_audit_df.set(pd.DataFrame())
-
-    @output
-    @render.ui
-    def archive_audit_results_ui():
-        df = archive_audit_df.get()
-        if df is None: return ui.HTML("")
-        
-        if df.empty:
-            return ui.p("No pending data to archive.", class_="text-muted")
-            
-        return ui.div(
-            ui.h5("⚠️ Data Pending Archival", class_="text-warning mt-3"),
-            ui.output_data_frame("archive_pending_table"),
-            ui.div(
-                ui.input_checkbox("confirm_archive_check", "I authorize flattening this data into the archive and permanently purging it from active tables."),
-                class_="mt-3"
-            ),
-            ui.output_ui("archive_execute_btn_ui")
-        )
-
-    @output
-    @render.data_frame
-    def archive_pending_table():
-        df = archive_audit_df.get()
-        if df is not None and not df.empty:
-            df['Records_to_Archive'] = df['Records_to_Archive'].apply(lambda x: f"{int(x):,}")
-            return render.DataGrid(df, summary=False)
-        return render.DataGrid(pd.DataFrame())
-
-    @output
-    @render.ui
-    def archive_execute_btn_ui():
-        if input.confirm_archive_check():
-            return ui.input_action_button("run_archive_execute_btn", "🚀 Execute Archive & Purge", class_="btn-danger w-100 mt-2")
-        return ui.HTML("")
-
-    # New Reactive Value to hold the before and after counts
-    archive_impact_df = reactive.Value(None)
-
-    @reactive.Effect
-    @reactive.event(input.run_archive_execute_btn)
-    def execute_data_archival():
-        if client is None: return
-            
-        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
-        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
-        manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-        
-        try:
-            # --- 1. TAKE "BEFORE" SNAPSHOT ---
-            def get_row_count(table_path):
-                try:
-                    return client.query(f"SELECT COUNT(*) as c FROM `{table_path}`").to_dataframe()['c'].iloc[0]
-                except:
-                    return 0
-                    
-            before_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
-            before_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
-            before_rej = get_row_count(manual_rej_table)
-
-            # --- 2. EXECUTE ARCHIVE & PURGE ---
-            
-            # Insert into Archive by checking the registry's Status column
-            archive_insert_q = f"""
-                INSERT INTO `{archive_table}` 
-                SELECT v.* FROM `{view_table}` v
-                WHERE EXISTS (
-                    SELECT 1 FROM `{NODE_REGISTRY_TABLE}` r
-                    WHERE r.NodeNum = v.NodeNum 
-                      AND r.Project = v.Project
-                      AND UPPER(r.Status) = 'ARCHIVED'
-                )
-                EXCEPT DISTINCT 
-                SELECT * FROM `{archive_table}`
-            """
-            client.query(archive_insert_q).result()
-            
-            # Delete from raw tables using the registry map
-            for table_name in ["raw_lord", "raw_sensorpush"]:
-                raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
-                delete_raw_q = f"""
-                    DELETE FROM `{raw_target}` raw
-                    WHERE EXISTS (
-                        SELECT 1 FROM `{view_table}` v
-                        JOIN `{NODE_REGISTRY_TABLE}` r ON v.NodeNum = r.NodeNum AND v.Project = r.Project
-                        WHERE v.NodeNum = raw.NodeNum 
-                          AND v.timestamp = raw.timestamp 
-                          AND UPPER(r.Status) = 'ARCHIVED'
-                    )
-                """
-                client.query(delete_raw_q).result()
-
-            # Delete from manual_rejections using the registry map
-            delete_rej_q = f"""
-                DELETE FROM `{manual_rej_table}` raw
-                WHERE EXISTS (
-                    SELECT 1 FROM `{view_table}` v
-                    JOIN `{NODE_REGISTRY_TABLE}` r ON v.NodeNum = r.NodeNum AND v.Project = r.Project
-                    WHERE v.NodeNum = raw.NodeNum 
-                      AND v.timestamp = raw.timestamp 
-                      AND UPPER(r.Status) = 'ARCHIVED'
-                )
-            """
-            client.query(delete_rej_q).result()
-
-            # Delete the successfully archived items from the Node Registry 
-            delete_reg_q = f"""
-                DELETE FROM `{NODE_REGISTRY_TABLE}`
-                WHERE UPPER(Status) = 'ARCHIVED'
-            """
-            client.query(delete_reg_q).result()
-            
-            # --- 3. TAKE "AFTER" SNAPSHOT & BUILD MATRIX ---
-            after_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
-            after_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
-            after_rej = get_row_count(manual_rej_table)
-            
-            summary_data = {
-                "Table Name": ["raw_lord", "raw_sensorpush", "manual_rejections"],
-                "Before Archive": [before_lord, before_sp, before_rej],
-                "Records Purged": [before_lord - after_lord, before_sp - after_sp, before_rej - after_rej],
-                "Remaining Active": [after_lord, after_sp, after_rej]
-            }
-            archive_impact_df.set(pd.DataFrame(summary_data))
-                
-            ui.notification_show("Success! Data has been archived and purged.", type="success", duration=15)
-            
-            # Reset UI and reload the live inventory table
-            archive_audit_df.set(None)
-            ui.update_checkbox("confirm_archive_check", value=False)
-            load_archive_inventory()
-            
-        except Exception as e:
-            ui.notification_show(f"Archival execution failed: {e}", type="error", duration=20)
-
-    # New Reactive Value to hold the time-based before and after counts
-    time_archive_impact_df = reactive.Value(None)
-
-    @reactive.Effect
-    @reactive.event(input.run_time_archive_btn)
-    def execute_time_archival():
-        if client is None: return
-        
-        days_old = input.archive_days_old()
-        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
-        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
-        manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-        
-        try:
-            # --- 1. TAKE "BEFORE" SNAPSHOT ---
-            def get_row_count(table_path):
-                try:
-                    return client.query(f"SELECT COUNT(*) as c FROM `{table_path}`").to_dataframe()['c'].iloc[0]
-                except:
-                    return 0
-                    
-            before_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
-            before_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
-            before_rej = get_row_count(manual_rej_table)
-
-            # --- 2. EXECUTE ARCHIVE & PURGE ---
-            archive_insert_q = f"""
-                INSERT INTO `{archive_table}` 
-                SELECT v.* FROM `{view_table}` v
-                WHERE v.timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
-                EXCEPT DISTINCT 
-                SELECT * FROM `{archive_table}`
-            """
-            client.query(archive_insert_q).result()
-            
-            for table_name in ["raw_lord", "raw_sensorpush"]:
-                raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
-                delete_raw_q = f"""
-                    DELETE FROM `{raw_target}`
-                    WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
-                """
-                client.query(delete_raw_q).result()
-
-            delete_rej_q = f"""
-                DELETE FROM `{manual_rej_table}`
-                WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
-            """
-            client.query(delete_rej_q).result()
-            
-            # --- 3. TAKE "AFTER" SNAPSHOT & BUILD MATRIX ---
-            after_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
-            after_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
-            after_rej = get_row_count(manual_rej_table)
-            
-            summary_data = {
-                "Table Name": ["raw_lord", "raw_sensorpush", "manual_rejections"],
-                "Before Archive": [before_lord, before_sp, before_rej],
-                "Records Purged": [before_lord - after_lord, before_sp - after_sp, before_rej - after_rej],
-                "Remaining Active": [after_lord, after_sp, after_rej]
-            }
-            time_archive_impact_df.set(pd.DataFrame(summary_data))
-                
-            ui.notification_show(f"Success! All data older than {days_old} days has been archived and purged.", type="success", duration=15)
-            
-            # Reload the live inventory table
-            load_archive_inventory()
-            
-        except Exception as e:
-            ui.notification_show(f"Time archival failed: {e}", type="error", duration=20)
-
-    # --- 4. RENDER THE IMPACT MATRIX ---
-    @output
-    @render.ui
-    def time_archive_impact_results_ui():
-        df = time_archive_impact_df.get()
-        if df is None or df.empty: return ui.HTML("")
-        
-        return ui.div(
-            ui.h5(f"✅ Time-Based Archival Impact Summary", class_="text-success mt-4"),
-            ui.output_data_frame("time_archive_impact_table"),
-            ui.input_action_button("clear_time_impact_btn", "Dismiss Summary", class_="btn-sm btn-outline-secondary mt-2")
-        )
-
-    @output
-    @render.data_frame
-    def time_archive_impact_table():
-        df = time_archive_impact_df.get()
-        if df is not None and not df.empty:
-            for col in ['Before Archive', 'Records Purged', 'Remaining Active']:
-                df[col] = df[col].apply(lambda x: f"{int(x):,}")
-            return render.DataGrid(df, summary=False)
-        return render.DataGrid(pd.DataFrame())
-
-    @reactive.Effect
-    @reactive.event(input.clear_time_impact_btn)
-    def dismiss_time_impact_summary():
-        time_archive_impact_df.set(None)
-
-    # --- 3. Bulk Approval & Data Status Change ---
+    # --- 2. Bulk Approval & Data Status Change ---
     verify_match_count = reactive.Value(None)
     constructed_where_clause = reactive.Value(None)
     
@@ -847,9 +567,329 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             
         except Exception as e:
             ui.notification_show(f"Override update failed: {e}", type="error", duration=15)
-            
+
     # =========================================================================
-    # TAB 4: PROJECT MASTER LOGIC
+    # TAB 3: DATA ARCHIVAL LOGIC
+    # =========================================================================
+    
+    # --- Live Archive Inventory Table ---
+    archive_audit_df = reactive.Value(None)
+    current_archive_df = reactive.Value(None)
+    archive_impact_df = reactive.Value(None)
+    time_archive_impact_df = reactive.Value(None)
+    
+    def load_archive_inventory():
+        if client is None: return
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        try:
+            q = f"""
+                SELECT 
+                    Project, 
+                    FORMAT_TIMESTAMP('%Y-%m-%d', MIN(timestamp)) as Start_Date, 
+                    FORMAT_TIMESTAMP('%Y-%m-%d', MAX(timestamp)) as End_Date, 
+                    COUNT(*) as Total_Records 
+                FROM `{archive_table}` 
+                GROUP BY Project 
+                ORDER BY Project DESC
+            """
+            df = client.query(q).to_dataframe()
+            current_archive_df.set(df)
+        except Exception:
+            current_archive_df.set(pd.DataFrame())
+
+    @reactive.Effect
+    def init_archive_inventory():
+        load_archive_inventory()
+
+    @output
+    @render.data_frame
+    def current_archive_df_ui():
+        df = current_archive_df.get()
+        if df is not None and not df.empty:
+            df['Total_Records'] = df['Total_Records'].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame(columns=["Project", "Start Date", "End Date", "Total Records"]))
+
+    # --- Project Data Archival Engine ---
+    @reactive.Effect
+    @reactive.event(input.audit_archive_btn)
+    def run_archive_audit():
+        if client is None: return
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        
+        audit_q = f"""
+            SELECT 
+                v.Project,
+                FORMAT_TIMESTAMP('%Y-%m-%d', MIN(v.timestamp)) as Start_Date, 
+                FORMAT_TIMESTAMP('%Y-%m-%d', MAX(v.timestamp)) as End_Date, 
+                COUNT(*) as Records_to_Archive
+            FROM `{view_table}` v
+            WHERE EXISTS (
+                SELECT 1 FROM `{NODE_REGISTRY_TABLE}` r
+                WHERE r.NodeNum = v.NodeNum 
+                  AND r.Project = v.Project
+                  AND UPPER(r.Status) = 'ARCHIVED'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM `{archive_table}` a
+                WHERE a.NodeNum = v.NodeNum 
+                  AND a.timestamp = v.timestamp
+            )
+            GROUP BY v.Project
+            ORDER BY v.Project
+        """
+        try:
+            df = client.query(audit_q).to_dataframe()
+            archive_audit_df.set(df)
+            if df.empty:
+                ui.notification_show("No new active records found to archive.", type="warning")
+        except Exception as e:
+            ui.notification_show(f"Archive audit failed: {e}", type="error")
+            archive_audit_df.set(pd.DataFrame())
+
+    @output
+    @render.ui
+    def archive_audit_results_ui():
+        df = archive_audit_df.get()
+        if df is None: return ui.HTML("")
+        
+        if df.empty:
+            return ui.p("No pending data to archive.", class_="text-muted")
+            
+        return ui.div(
+            ui.h5("⚠️ Data Pending Archival", class_="text-warning mt-3"),
+            ui.output_data_frame("archive_pending_table"),
+            ui.div(
+                ui.input_checkbox("confirm_archive_check", "I authorize flattening this data into the archive and permanently purging it from active tables."),
+                class_="mt-3"
+            ),
+            ui.output_ui("archive_execute_btn_ui")
+        )
+
+    @output
+    @render.data_frame
+    def archive_pending_table():
+        df = archive_audit_df.get()
+        if df is not None and not df.empty:
+            df['Records_to_Archive'] = df['Records_to_Archive'].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame())
+
+    @output
+    @render.ui
+    def archive_execute_btn_ui():
+        if input.confirm_archive_check():
+            return ui.input_action_button("run_archive_execute_btn", "🚀 Execute Archive & Purge", class_="btn-danger w-100 mt-2")
+        return ui.HTML("")
+
+    @reactive.Effect
+    @reactive.event(input.run_archive_execute_btn)
+    def execute_data_archival():
+        if client is None: return
+            
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+        
+        try:
+            def get_row_count(table_path):
+                try:
+                    return client.query(f"SELECT COUNT(*) as c FROM `{table_path}`").to_dataframe()['c'].iloc[0]
+                except:
+                    return 0
+                    
+            before_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            before_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            before_rej = get_row_count(manual_rej_table)
+
+            archive_insert_q = f"""
+                INSERT INTO `{archive_table}` 
+                SELECT v.* FROM `{view_table}` v
+                WHERE EXISTS (
+                    SELECT 1 FROM `{NODE_REGISTRY_TABLE}` r
+                    WHERE r.NodeNum = v.NodeNum 
+                      AND r.Project = v.Project
+                      AND UPPER(r.Status) = 'ARCHIVED'
+                )
+                EXCEPT DISTINCT 
+                SELECT * FROM `{archive_table}`
+            """
+            client.query(archive_insert_q).result()
+            
+            for table_name in ["raw_lord", "raw_sensorpush"]:
+                raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+                delete_raw_q = f"""
+                    DELETE FROM `{raw_target}` raw
+                    WHERE EXISTS (
+                        SELECT 1 FROM `{view_table}` v
+                        JOIN `{NODE_REGISTRY_TABLE}` r ON v.NodeNum = r.NodeNum AND v.Project = r.Project
+                        WHERE v.NodeNum = raw.NodeNum 
+                          AND v.timestamp = raw.timestamp 
+                          AND UPPER(r.Status) = 'ARCHIVED'
+                    )
+                """
+                client.query(delete_raw_q).result()
+
+            delete_rej_q = f"""
+                DELETE FROM `{manual_rej_table}` raw
+                WHERE EXISTS (
+                    SELECT 1 FROM `{view_table}` v
+                    JOIN `{NODE_REGISTRY_TABLE}` r ON v.NodeNum = r.NodeNum AND v.Project = r.Project
+                    WHERE v.NodeNum = raw.NodeNum 
+                      AND v.timestamp = raw.timestamp 
+                      AND UPPER(r.Status) = 'ARCHIVED'
+                )
+            """
+            client.query(delete_rej_q).result()
+
+            delete_reg_q = f"""
+                DELETE FROM `{NODE_REGISTRY_TABLE}`
+                WHERE UPPER(Status) = 'ARCHIVED'
+            """
+            client.query(delete_reg_q).result()
+            
+            after_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            after_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            after_rej = get_row_count(manual_rej_table)
+            
+            summary_data = {
+                "Table Name": ["raw_lord", "raw_sensorpush", "manual_rejections"],
+                "Before Archive": [before_lord, before_sp, before_rej],
+                "Records Purged": [before_lord - after_lord, before_sp - after_sp, before_rej - after_rej],
+                "Remaining Active": [after_lord, after_sp, after_rej]
+            }
+            archive_impact_df.set(pd.DataFrame(summary_data))
+                
+            ui.notification_show("Success! Data has been archived and purged.", type="success", duration=15)
+            
+            archive_audit_df.set(None)
+            ui.update_checkbox("confirm_archive_check", value=False)
+            load_archive_inventory()
+            
+        except Exception as e:
+            ui.notification_show(f"Archival execution failed: {e}", type="error", duration=20)
+
+    @output
+    @render.ui
+    def archive_impact_results_ui():
+        df = archive_impact_df.get()
+        if df is None or df.empty: return ui.HTML("")
+        
+        return ui.div(
+            ui.h5("✅ Archival Impact Summary", class_="text-success mt-4"),
+            ui.output_data_frame("archive_impact_table"),
+            ui.input_action_button("clear_impact_btn", "Dismiss Summary", class_="btn-sm btn-outline-secondary mt-2")
+        )
+
+    @output
+    @render.data_frame
+    def archive_impact_table():
+        df = archive_impact_df.get()
+        if df is not None and not df.empty:
+            for col in ['Before Archive', 'Records Purged', 'Remaining Active']:
+                df[col] = df[col].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame())
+
+    @reactive.Effect
+    @reactive.event(input.clear_impact_btn)
+    def dismiss_impact_summary():
+        archive_impact_df.set(None)
+
+    # --- Rolling Time-Based Archive Engine ---
+    @reactive.Effect
+    @reactive.event(input.run_time_archive_btn)
+    def execute_time_archival():
+        if client is None: return
+        
+        days_old = input.archive_days_old()
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+        
+        try:
+            def get_row_count(table_path):
+                try:
+                    return client.query(f"SELECT COUNT(*) as c FROM `{table_path}`").to_dataframe()['c'].iloc[0]
+                except:
+                    return 0
+                    
+            before_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            before_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            before_rej = get_row_count(manual_rej_table)
+
+            archive_insert_q = f"""
+                INSERT INTO `{archive_table}` 
+                SELECT v.* FROM `{view_table}` v
+                WHERE v.timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
+                EXCEPT DISTINCT 
+                SELECT * FROM `{archive_table}`
+            """
+            client.query(archive_insert_q).result()
+            
+            for table_name in ["raw_lord", "raw_sensorpush"]:
+                raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+                delete_raw_q = f"""
+                    DELETE FROM `{raw_target}`
+                    WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
+                """
+                client.query(delete_raw_q).result()
+
+            delete_rej_q = f"""
+                DELETE FROM `{manual_rej_table}`
+                WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
+            """
+            client.query(delete_rej_q).result()
+            
+            after_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            after_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            after_rej = get_row_count(manual_rej_table)
+            
+            summary_data = {
+                "Table Name": ["raw_lord", "raw_sensorpush", "manual_rejections"],
+                "Before Archive": [before_lord, before_sp, before_rej],
+                "Records Purged": [before_lord - after_lord, before_sp - after_sp, before_rej - after_rej],
+                "Remaining Active": [after_lord, after_sp, after_rej]
+            }
+            time_archive_impact_df.set(pd.DataFrame(summary_data))
+                
+            ui.notification_show(f"Success! All data older than {days_old} days has been archived and purged.", type="success", duration=15)
+            
+            load_archive_inventory()
+            
+        except Exception as e:
+            ui.notification_show(f"Time archival failed: {e}", type="error", duration=20)
+
+    @output
+    @render.ui
+    def time_archive_impact_results_ui():
+        df = time_archive_impact_df.get()
+        if df is None or df.empty: return ui.HTML("")
+        
+        return ui.div(
+            ui.h5(f"✅ Time-Based Archival Impact Summary", class_="text-success mt-4"),
+            ui.output_data_frame("time_archive_impact_table"),
+            ui.input_action_button("clear_time_impact_btn", "Dismiss Summary", class_="btn-sm btn-outline-secondary mt-2")
+        )
+
+    @output
+    @render.data_frame
+    def time_archive_impact_table():
+        df = time_archive_impact_df.get()
+        if df is not None and not df.empty:
+            for col in ['Before Archive', 'Records Purged', 'Remaining Active']:
+                df[col] = df[col].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame())
+
+    @reactive.Effect
+    @reactive.event(input.clear_time_impact_btn)
+    def dismiss_time_impact_summary():
+        time_archive_impact_df.set(None)
+
+    # =========================================================================
+    # TAB 4 & BEYOND: REMAINING LOGIC
     # =========================================================================
     @output
     @render.data_frame
@@ -865,9 +905,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         """
         return render.DataGrid(client.query(directory_q).to_dataframe())
 
-    # =========================================================================
-    # TAB 5: PIPE MAPPER LOGIC
-    # =========================================================================
+    # --- Pipe Mapper Logic ---
     mapped_pipes_df = reactive.Value(pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y']))
     
     @output
