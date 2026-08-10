@@ -525,7 +525,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             ui.update_checkbox("blk_confirm_check", value=False)
             
         except Exception as e:
-            ui.notification_show(f"Override update failed: {e}", type="error", duration=15)lk_update():
+            ui.notification_show(f"Override update failed: {e}", type="error", duration=15)
         where_clause = constructed_where_clause.get()
         new_status = input.blk_new_status()
         
