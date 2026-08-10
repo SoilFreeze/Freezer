@@ -59,18 +59,36 @@ def admin_ui():
                 ui.output_data_frame("deployment_overview_df")
             ),
             
-            # --- TAB 2: BULK APPROVAL ---
+            # --- TAB 2: BULK APPROVAL & DATABASE MAINTENANCE ---
             ui.nav_panel("⚡ Bulk Approval",
-                ui.h3("⚡ Bulk Approval and Database Maintenance"),
-                ui.p("Consolidate raw datasets into 1-decimal hourly averages and safely remove all high-frequency and duplicate records system-wide."),
+                ui.h2("⚡ Bulk Approval and Database Maintenance"),
+                ui.hr(),
+                
+                # --- GLOBAL DATABASE CLEANUP ---
+                ui.h3("🧹 Global Database Cleanup"),
+                ui.markdown("Consolidate raw datasets into **1-decimal hourly averages** and safely remove all high-frequency and duplicate records system-wide. **Note:** Running this automatically drops rogue data points outside the physical bounds of -30°F and 120°F."),
+                
+                ui.input_action_button("audit_db_btn", "🔍 Step 1: Audit Database & Calculate Cleanup Impact", class_="btn-outline-secondary w-100 mb-3"),
+                ui.output_ui("audit_results_ui"),
+                
+                ui.hr(),
+                
+                # --- BULK APPROVAL AND DATA STATUS CHANGE ---
+                ui.h3("⚡ Bulk Approval and Data Status Change"),
+                
+                ui.div(
+                    ui.markdown("💡 **Important:** Please ensure you have selected your targeted project framework or 'All Projects' in the sidebar menu before applying any status overrides."),
+                    class_="alert alert-info"
+                ),
                 
                 ui.layout_columns(
-                    ui.input_radio_buttons("blk_target_scope", "Target Scope", ["Project Wide", "Specific Location", "Specific Node"], inline=True),
+                    ui.input_radio_buttons("blk_target_scope", "Target Scope", ["Project Wide", "Specific Location", "Specific Node"], inline=False),
                     ui.input_select("blk_current_status", "Filter Current Designation Status:", ["ALL", "ALL BUT NULL", "TRUE", "NULL (STREAMING / UNREVIEWED)", "MASKED", "OFFICE", "BADDATA"]),
                     ui.input_select("blk_new_status", "Set Approval Status To:", ["TRUE", "MASKED", "OFFICE", "BADDATA"])
                 ),
                 ui.hr(),
                 
+                # Secondary Filters for Bulk Approval
                 ui.layout_columns(
                     ui.div(
                         ui.input_select("blk_temp_dir", "Temporal Direction", ["Between Range", "Older Than", "Newer Than"]),
@@ -182,6 +200,75 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             GROUP BY 1,2,3,4 ORDER BY p.Project ASC
         """
         return client.query(sum_q).to_dataframe()
+
+    # =========================================================================
+    # TAB 1: ADMIN SUMMARY LOGIC
+    # =========================================================================
+    @output
+    @render.data_frame
+    def fleet_breakdown_df():
+        reg_df = get_full_registry()
+        if reg_df.empty: return pd.DataFrame()
+        
+        def classify_family(node): 
+            return "Lord" if "-ch" in str(node).lower() else "SP" if str(node).lower().startswith("sp") else "TP" if str(node).lower().startswith("tp") else "Other"
+        
+        fleet_df = reg_df.copy()
+        fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_family)
+        fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
+        
+        deduped = fleet_df.sort_values(by=['Parent ID']).drop_duplicates(subset=['Parent ID']).copy()
+        
+        # FIX: SensorStatus dictates data limits, not physical inventory status. 
+        # Grouping by a placeholder 'Inventory_Status' (or falling back to 'On Project' if missing)
+        if 'Inventory_Status' not in deduped.columns:
+            deduped['Inventory_Status'] = 'On Project'
+            
+        pivot = deduped.groupby(['Hardware Family', 'Inventory_Status']).size().unstack(fill_value=0).reindex(["TP", "SP", "Lord", "Other"], fill_value=0)
+        
+        for col in ["Available", "Dead", "Diagnostic", "On Project"]: 
+            if col not in pivot.columns: pivot[col] = 0
+            
+        pivot = pivot[["Available", "Dead", "Diagnostic", "On Project"]]
+        pivot['Total Units'] = pivot.sum(axis=1)
+        return render.DataGrid(pivot.reset_index())
+
+    @output
+    @render.data_frame
+    def deployment_overview_df():
+        matrix_df = get_fleet_matrix()
+        if matrix_df.empty: return pd.DataFrame()
+        
+        rows = []
+        current_tz = display_tz() if callable(display_tz) else display_tz 
+        
+        for _, r in matrix_df.iterrows():
+            elapsed = max(0, (pd.Timestamp.now(tz=current_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
+            rows.append({
+                "Project ID": r['Project'], 
+                "Project Name": r['ProjectName'] or r['Project'], 
+                "Mapped Sensors": int(r['Mapped_Sensors']), 
+                "Active (6h)": int(r['Active_6h']), 
+                "Active (24h)": int(r['Active_24h']), 
+                "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"
+            })
+        return render.DataGrid(pd.DataFrame(rows))
+
+    # =========================================================================
+    # TAB 2: BULK APPROVAL & DATABASE MAINTENANCE
+    # =========================================================================
+    
+    # --- 1. Global Database Cleanup (Consolidation) ---
+    @output
+    @render.ui
+    def audit_results_ui():
+        if input.audit_db_btn() > 0:
+            return ui.div(
+                ui.p("✅ Audit complete. The database is ready to be consolidated.", class_="text-success fw-bold"),
+                ui.input_action_button("run_consolidation_btn", "⚠️ Execute Global Consolidation", class_="btn-danger w-100")
+            )
+        return ui.HTML("")
+
     @reactive.Effect
     @reactive.event(input.run_consolidation_btn)
     def run_global_consolidation():
@@ -189,7 +276,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         
         target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         
-        # This replaces the table with an hourly aggregated version of itself
+        # Replaces the table with an hourly aggregated version & trims bad data
         consolidation_q = f"""
             CREATE OR REPLACE TABLE `{target_table}` AS
             SELECT 
@@ -207,72 +294,20 @@ def admin_server(input, output, session, client, selected_project, display_tz):
                 MAX(node_elevation) as node_elevation,
                 ROUND(AVG(temperature), 1) as temperature
             FROM `{target_table}`
+            WHERE temperature >= -30.0 AND temperature <= 120.0
             GROUP BY timestamp, NodeNum
         """
         
         try:
             client.query(consolidation_q).result()
-            ui.notification_show("Consolidation complete! High-frequency data has been averaged.", type="success")
+            ui.notification_show("Consolidation complete! High-frequency data averaged and out-of-bounds data dropped.", type="success", duration=10)
         except Exception as e:
-            ui.notification_show(f"Consolidation failed: {e}", type="error")
-            
-    # --- TAB 1: ADMIN SUMMARY LOGIC ---
-    @output
-    @render.data_frame
-    def fleet_breakdown_df():
-        reg_df = get_full_registry()
-        if reg_df.empty: return pd.DataFrame()
-        
-        def classify_family(node): return "Lord" if "-ch" in str(node).lower() else "SP" if str(node).lower().startswith("sp") else "TP" if str(node).lower().startswith("tp") else "Other"
-        
-        fleet_df = reg_df.copy()
-        fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_family)
-        fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
-        
-        deduped = fleet_df.sort_values(by=['Parent ID']).drop_duplicates(subset=['Parent ID']).copy()
-        # The current problematic line in admin_server:
-        pivot = deduped.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0).reindex(["TP", "SP", "Lord", "Other"], fill_value=0)
-        
-        for col in ["Available", "Dead", "Diagnostic", "On Project"]: 
-            if col not in pivot.columns: pivot[col] = 0
-            
-        pivot = pivot[["Available", "Dead", "Diagnostic", "On Project"]]
-        pivot['Total Units'] = pivot.sum(axis=1)
-        return render.DataGrid(pivot.reset_index())
+            ui.notification_show(f"Consolidation failed: {e}", type="error", duration=10)
 
-    @output
-    @render.data_frame
-    def deployment_overview_df():
-        matrix_df = get_fleet_matrix()
-        if matrix_df.empty: return pd.DataFrame()
-        
-        rows = []
-        # Reactive inputs like display_tz must be resolved by caller (passed down from main)
-        current_tz = display_tz() if callable(display_tz) else display_tz 
-        
-        for _, r in matrix_df.iterrows():
-            elapsed = max(0, (pd.Timestamp.now(tz=current_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
-            rows.append({
-                "Project ID": r['Project'], 
-                "Project Name": r['ProjectName'] or r['Project'], 
-                "Mapped Sensors": int(r['Mapped_Sensors']), 
-                "Active (6h)": int(r['Active_6h']), 
-                "Active (24h)": int(r['Active_24h']), 
-                "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"
-            })
-        return render.DataGrid(pd.DataFrame(rows))
-    # =========================================================================
-    # TAB 2: BULK APPROVAL & VERIFICATION LOGIC
-    # =========================================================================
-    ui.hr(),
-    ui.h4("🧹 System-Wide Consolidation"),
-    ui.p("This will permanently compress high-frequency data into 1-hour averages and round temperatures to 1 decimal place."),
-    ui.input_action_button("run_consolidation_btn", "🔄 Run Global Consolidation Job", class_="btn-warning w-100")
-    
+    # --- 2. Bulk Approval & Data Status Change ---
     verify_match_count = reactive.Value(None)
     constructed_where_clause = reactive.Value(None)
     
-    # --- 1. Dynamic UI Renderers ---
     @output
     @render.ui
     def blk_scope_ui():
@@ -291,7 +326,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         else:
             return ui.input_date("blk_single_date", "Target Date")
 
-    # --- 2. Verification & Match Lookup ---
     @reactive.Effect
     @reactive.event(input.blk_verify_btn)
     def verify_bulk_action():
@@ -339,16 +373,14 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         where_clause = " AND ".join(where_parts) if where_parts else "1=1"
         constructed_where_clause.set(where_clause)
         
-        # Execute Count Query
         try:
-            target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" # Adjust table name if needed
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" 
             q = f"SELECT COUNT(*) as match_count FROM `{target_table}` WHERE {where_clause}"
             df = client.query(q).to_dataframe()
             verify_match_count.set(int(df['match_count'].iloc[0]))
         except Exception as e:
             verify_match_count.set(f"Error: {e}")
 
-    # --- 3. Render Verification Results ---
     @output
     @render.ui
     def blk_verify_results_ui():
@@ -371,7 +403,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             return ui.input_action_button("blk_execute_btn", "⚠️ EXECUTE BULK UPDATE", class_="btn-danger w-100")
         return ui.HTML("")
 
-    # --- 4. Execute the Bulk Update ---
     @reactive.Effect
     @reactive.event(input.blk_execute_btn)
     def execute_bulk_update():
@@ -391,7 +422,9 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         except Exception as e:
             ui.notification_show(f"Update failed: {e}", type="error")
             
-    # --- TAB 4: PROJECT MASTER LOGIC ---
+    # =========================================================================
+    # TAB 4: PROJECT MASTER LOGIC
+    # =========================================================================
     @output
     @render.data_frame
     def project_master_df():
@@ -406,7 +439,9 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         """
         return render.DataGrid(client.query(directory_q).to_dataframe())
 
-    # --- TAB 5: PIPE MAPPER LOGIC (Interactive Image Click) ---
+    # =========================================================================
+    # TAB 5: PIPE MAPPER LOGIC
+    # =========================================================================
     mapped_pipes_df = reactive.Value(pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y']))
     
     @output
@@ -434,7 +469,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         
         img_path = os.path.join("as_builts", img_val)
         
-        # In Shiny, we use ui.output_image with click=True to capture X/Y pixel coordinates natively
         return ui.div(
             ui.p(f"👆 Click on the map to log coordinates."),
             ui.output_image("site_map_image", click=True)
