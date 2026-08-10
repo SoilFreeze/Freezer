@@ -82,7 +82,15 @@ def admin_ui():
                 ui.output_ui("archive_audit_results_ui"),
                 ui.output_ui("archive_impact_results_ui"), # <-- New Impact Matrix Output
                 ui.hr(),
-                
+
+                ui.hr(),
+                ui.h4("⏳ Rolling Time-Based Archive"),
+                ui.markdown("Sweep all active tables and move any telemetry older than the specified threshold into the permanent archive."),
+                ui.layout_columns(
+                    ui.input_numeric("archive_days_old", "Archive data older than (days):", value=30, min=1),
+                    ui.input_action_button("run_time_archive_btn", "⏳ Execute Rolling Archive", class_="btn-warning mt-4")
+                ),
+                         
                 ui.h4("🗄️ Current Archive Inventory"),
                 ui.output_data_frame("current_archive_df_ui"),
                 ui.hr(),
@@ -612,6 +620,52 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         except Exception as e:
             ui.notification_show(f"Archival execution failed: {e}", type="error", duration=20)
 
+    @reactive.Effect
+    @reactive.event(input.run_time_archive_btn)
+    def execute_time_archival():
+        if client is None: return
+        
+        days_old = input.archive_days_old()
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+        physical_tables = ["raw_lord", "raw_sensorpush"]
+        
+        try:
+            # 1. Insert aging data into the archive
+            archive_insert_q = f"""
+                INSERT INTO `{archive_table}` 
+                SELECT v.* FROM `{view_table}` v
+                WHERE v.timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
+                EXCEPT DISTINCT 
+                SELECT * FROM `{archive_table}`
+            """
+            client.query(archive_insert_q).result()
+            
+            # 2. Delete aging data from raw tables
+            for table_name in physical_tables:
+                raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+                delete_raw_q = f"""
+                    DELETE FROM `{raw_target}`
+                    WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
+                """
+                client.query(delete_raw_q).result()
+
+            # 3. Delete aging data from manual_rejections
+            delete_rej_q = f"""
+                DELETE FROM `{manual_rej_table}`
+                WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
+            """
+            client.query(delete_rej_q).result()
+                
+            ui.notification_show(f"Success! All data older than {days_old} days has been archived and purged.", type="success", duration=15)
+            
+            # Reload the live inventory table
+            load_archive_inventory()
+            
+        except Exception as e:
+            ui.notification_show(f"Time archival failed: {e}", type="error", duration=20)
+    
     # --- 4. RENDER THE IMPACT MATRIX ---
     @output
     @render.ui
