@@ -489,7 +489,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         return ui.HTML("")
 
     @reactive.Effect
-    @reactive.event(input.blk_execute_btn)
+    @reactive.event(input.some_button)
     def execute_some_function(): 
     # (Your logic here)
         where_clause = constructed_where_clause.get()
