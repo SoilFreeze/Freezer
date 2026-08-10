@@ -74,15 +74,19 @@ def admin_ui():
                 ui.hr(),
 
                 # --- PROJECT DATA ARCHIVAL ---
-                ui.h3("📦 Project Data Archival"),
-                ui.markdown("Move a completed project's telemetry into the permanent `master_data_archive` table and purge it from the active ingestion tables. *This flattens the data and safely removes it from the relational tables to keep the system fast.*"),
                 
-                ui.layout_columns(
-                    ui.input_text("archive_target_proj", "Root Project ID to Archive (e.g., 2527):"),
-                    ui.input_action_button("run_archive_btn", "📦 Execute Archive & Purge", class_="btn-warning mt-4")
-                ),
+                ui.h3("📦 Project Data Archival"),
+                ui.markdown("Automatically move telemetry marked as **'Archived'** in the Node Registry into the permanent `master_data_archive` table, then purge it from all active ingestion tables (including the registry)."),
+                
+                ui.input_action_button("audit_archive_btn", "🔍 Step 1: Audit Ready-to-Archive Data", class_="btn-outline-secondary w-100 mb-3"),
+                
+                ui.output_ui("archive_audit_results_ui"),
                 ui.hr(),
                 
+                ui.h4("🗄️ Current Archive Inventory"),
+                ui.output_data_frame("current_archive_df_ui"),
+                ui.hr(),
+                         
                 # --- BULK APPROVAL AND DATA STATUS CHANGE ---
                 ui.h3("⚡ Bulk Approval and Data Status Change"),
                 
@@ -403,16 +407,108 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         except Exception as e:
             ui.notification_show(f"Consolidation failed: {e}", type="error", duration=15)
 
-    # --- 2. Project Data Archival ---
-    @reactive.Effect
-    @reactive.event(input.run_archive_btn)
-    def run_data_archival():
+    # --- 3. Project Data Archival ---
+    archive_audit_df = reactive.Value(None)
+    current_archive_df = reactive.Value(None)
+    
+    # Helper to load current archive inventory
+    def load_archive_inventory():
         if client is None: return
-        proj_id = input.archive_target_proj().strip()
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        try:
+            q = f"""
+                SELECT 
+                    Project, 
+                    FORMAT_TIMESTAMP('%Y-%m-%d', MIN(timestamp)) as Start_Date, 
+                    FORMAT_TIMESTAMP('%Y-%m-%d', MAX(timestamp)) as End_Date, 
+                    COUNT(*) as Total_Records 
+                FROM `{archive_table}` 
+                GROUP BY Project 
+                ORDER BY Project DESC
+            """
+            df = client.query(q).to_dataframe()
+            current_archive_df.set(df)
+        except Exception:
+            current_archive_df.set(pd.DataFrame())
+
+    # Load the inventory table on startup
+    @reactive.Effect
+    def init_archive_inventory():
+        load_archive_inventory()
+
+    @output
+    @render.data_frame
+    def current_archive_df_ui():
+        df = current_archive_df.get()
+        if df is not None and not df.empty:
+            # Add commas to the record counts for readability
+            df['Total_Records'] = df['Total_Records'].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame(columns=["Project", "Start Date", "End Date", "Total Records"]))
+
+    @reactive.Effect
+    @reactive.event(input.audit_archive_btn)
+    def run_archive_audit():
+        if client is None: return
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         
-        if not proj_id:
-            ui.notification_show("Please enter a valid project root ID.", type="warning")
-            return
+        # Look for anything marked as 'Archived' in the node registry via the view
+        audit_q = f"""
+            SELECT 
+                Project,
+                FORMAT_TIMESTAMP('%Y-%m-%d', MIN(timestamp)) as Start_Date, 
+                FORMAT_TIMESTAMP('%Y-%m-%d', MAX(timestamp)) as End_Date, 
+                COUNT(*) as Records_to_Archive
+            FROM `{view_table}`
+            WHERE UPPER(SensorStatus) = 'ARCHIVED'
+            GROUP BY Project
+            ORDER BY Project
+        """
+        try:
+            df = client.query(audit_q).to_dataframe()
+            archive_audit_df.set(df)
+            if df.empty:
+                ui.notification_show("No records found with SensorStatus = 'Archived'.", type="warning")
+        except Exception as e:
+            ui.notification_show(f"Archive audit failed: {e}", type="error")
+            archive_audit_df.set(pd.DataFrame())
+
+    @output
+    @render.ui
+    def archive_audit_results_ui():
+        df = archive_audit_df.get()
+        if df is None: return ui.HTML("")
+        
+        if df.empty:
+            return ui.p("No pending data to archive.", class_="text-muted")
+            
+        return ui.div(
+            ui.h5("⚠️ Data Pending Archival", class_="text-warning mt-3"),
+            ui.output_data_frame("archive_pending_table"),
+            ui.input_checkbox("confirm_archive_check", "I authorize flattening this data into the archive and permanently purging it from active tables.", class_="mt-3"),
+            ui.output_ui("archive_execute_btn_ui")
+        )
+
+    @output
+    @render.data_frame
+    def archive_pending_table():
+        df = archive_audit_df.get()
+        if df is not None and not df.empty:
+            df['Records_to_Archive'] = df['Records_to_Archive'].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame())
+
+    @output
+    @render.ui
+    def archive_execute_btn_ui():
+        if input.confirm_archive_check():
+            return ui.input_action_button("run_archive_execute_btn", "🚀 Execute Archive & Purge", class_="btn-danger w-100 mt-2")
+        return ui.HTML("")
+
+    @reactive.Effect
+    @reactive.event(input.run_archive_execute_btn)
+    def execute_data_archival():
+        if client is None: return
             
         archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
         view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
@@ -420,52 +516,57 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         physical_tables = ["raw_lord", "raw_sensorpush"]
         
         try:
-            # Step 1: Capture the fully denormalized active data into the archive.
+            # 1. Insert into Archive directly from the View
             archive_insert_q = f"""
                 INSERT INTO `{archive_table}` 
-                SELECT * FROM `{view_table}` WHERE Project LIKE '{proj_id}%'
+                SELECT * FROM `{view_table}` WHERE UPPER(SensorStatus) = 'ARCHIVED'
                 EXCEPT DISTINCT 
-                SELECT * FROM `{archive_table}` WHERE Project LIKE '{proj_id}%'
+                SELECT * FROM `{archive_table}`
             """
             client.query(archive_insert_q).result()
             
-            # Step 2: Delete from raw tables based on timestamps/nodes safely in the archive
+            # 2. Delete from raw tables using the view as a map
             for table_name in physical_tables:
                 raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 delete_raw_q = f"""
                     DELETE FROM `{raw_target}` raw
                     WHERE EXISTS (
-                        SELECT 1 FROM `{archive_table}` arc 
-                        WHERE arc.NodeNum = raw.NodeNum 
-                          AND arc.timestamp = raw.timestamp 
-                          AND arc.Project LIKE '{proj_id}%'
+                        SELECT 1 FROM `{view_table}` v
+                        WHERE v.NodeNum = raw.NodeNum 
+                          AND v.timestamp = raw.timestamp 
+                          AND UPPER(v.SensorStatus) = 'ARCHIVED'
                     )
                 """
                 client.query(delete_raw_q).result()
 
-            # Step 3: Delete from manual_rejections table
+            # 3. Delete from manual_rejections
             delete_rej_q = f"""
                 DELETE FROM `{manual_rej_table}` raw
                 WHERE EXISTS (
-                    SELECT 1 FROM `{archive_table}` arc 
-                    WHERE arc.NodeNum = raw.NodeNum 
-                      AND arc.timestamp = raw.timestamp 
-                      AND arc.Project LIKE '{proj_id}%'
+                    SELECT 1 FROM `{view_table}` v
+                    WHERE v.NodeNum = raw.NodeNum 
+                      AND v.timestamp = raw.timestamp 
+                      AND UPPER(v.SensorStatus) = 'ARCHIVED'
                 )
             """
             client.query(delete_rej_q).result()
 
-            # Step 4: Delete the project mappings from the Node Registry
+            # 4. Delete from Node Registry 
             delete_reg_q = f"""
                 DELETE FROM `{NODE_REGISTRY_TABLE}`
-                WHERE Project LIKE '{proj_id}%'
+                WHERE UPPER(SensorStatus) = 'ARCHIVED'
             """
             client.query(delete_reg_q).result()
                 
-            ui.notification_show(f"Success! Project {proj_id} has been fully flattened into the archive and purged from active tables.", type="success", duration=15)
+            ui.notification_show("Success! Data has been archived and purged.", type="success", duration=15)
+            
+            # Reset UI and reload the live inventory table
+            archive_audit_df.set(None)
+            ui.update_checkbox("confirm_archive_check", value=False)
+            load_archive_inventory()
             
         except Exception as e:
-            ui.notification_show(f"Archival failed: {e}", type="error", duration=20)
+            ui.notification_show(f"Archival execution failed: {e}", type="error", duration=20)
 
 
     # --- 3. Bulk Approval & Data Status Change ---
