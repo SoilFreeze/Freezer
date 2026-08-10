@@ -87,7 +87,13 @@ def admin_ui():
                 ui.h4("⏳ Rolling Time-Based Archive"),
                 ui.markdown("Sweep all active tables and move any telemetry older than the specified threshold into the permanent archive."),
                 ui.layout_columns(
-                    ui.input_numeric("archive_days_old", "Archive data older than (days):", value=30, min=1),
+                    ui.input_numeric(
+                        "history_days", # Your specific ID here might be slightly different
+                        "Days of history to keep:", 
+                        value=14, 
+                        min=1, 
+                        max=30
+                    ),
                     ui.input_action_button("run_time_archive_btn", "⏳ Execute Rolling Archive", class_="btn-warning mt-4")
                 ),
                          
