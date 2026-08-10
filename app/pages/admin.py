@@ -197,6 +197,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
         
         deduped = fleet_df.sort_values(by=['Parent ID']).drop_duplicates(subset=['Parent ID']).copy()
+        # The current problematic line in admin_server:
         pivot = deduped.groupby(['Hardware Family', 'SensorStatus']).size().unstack(fill_value=0).reindex(["TP", "SP", "Lord", "Other"], fill_value=0)
         
         for col in ["Available", "Dead", "Diagnostic", "On Project"]: 
