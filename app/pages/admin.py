@@ -259,14 +259,97 @@ def admin_server(input, output, session, client, selected_project, display_tz):
     # =========================================================================
     
     # --- 1. Global Database Cleanup (Consolidation) ---
+    audit_matrix_df = reactive.Value(None)
+
+    @reactive.Effect
+    @reactive.event(input.audit_db_btn)
+    def run_database_audit():
+        if client is None: return
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        
+        # This query calculates the exact impact of grouping by hour
+        audit_q = f"""
+            WITH BaseData AS (
+                SELECT 
+                    CASE 
+                        WHEN UPPER(CAST(Hardware AS STRING)) LIKE '%LORD%' THEN 'Lord Wireless'
+                        ELSE 'SensorPush'
+                    END as Table_Name,
+                    NodeNum,
+                    TIMESTAMP_TRUNC(timestamp, HOUR) as hour_bucket
+                FROM `{target_table}`
+                WHERE temperature >= -30.0 AND temperature <= 120.0
+            ),
+            Aggregated AS (
+                SELECT 
+                    Table_Name,
+                    COUNT(*) as Total_Points,
+                    COUNT(DISTINCT CONCAT(CAST(hour_bucket AS STRING), CAST(NodeNum AS STRING))) as Final_Points
+                FROM BaseData
+                GROUP BY Table_Name
+            )
+            SELECT 
+                Table_Name as `Table`,
+                Total_Points as `Total Points`,
+                0 as `Doubles to Delete`,
+                (Total_Points - Final_Points) as `Points to Merge`,
+                Final_Points as `Final Points`
+            FROM Aggregated
+            ORDER BY `Table` DESC
+        """
+        
+        try:
+            df = client.query(audit_q).to_dataframe()
+            
+            # Generate the "Combined Total" footer row
+            if not df.empty:
+                total_row = pd.DataFrame({
+                    'Table': ['Combined Total'],
+                    'Total Points': [df['Total Points'].sum()],
+                    'Doubles to Delete': [df['Doubles to Delete'].sum()],
+                    'Points to Merge': [df['Points to Merge'].sum()],
+                    'Final Points': [df['Final Points'].sum()]
+                })
+                df = pd.concat([df, total_row], ignore_index=True)
+                
+            audit_matrix_df.set(df)
+        except Exception as e:
+            ui.notification_show(f"Audit failed: {e}", type="error")
+            audit_matrix_df.set(pd.DataFrame())
+
     @output
     @render.ui
     def audit_results_ui():
-        if input.audit_db_btn() > 0:
-            return ui.div(
-                ui.p("✅ Audit complete. The database is ready to be consolidated.", class_="text-success fw-bold"),
-                ui.input_action_button("run_consolidation_btn", "⚠️ Execute Global Consolidation", class_="btn-danger w-100")
-            )
+        df = audit_matrix_df.get()
+        if df is None:
+            return ui.HTML("")
+            
+        return ui.div(
+            ui.h4("📊 Cleanup Impact Matrix", class_="mt-4"),
+            ui.output_data_frame("audit_impact_table"),
+            ui.hr(),
+            ui.input_checkbox("audit_confirm_check", "I authorize permanently merging and deleting these records."),
+            ui.output_ui("audit_execute_btn_ui")
+        )
+        
+    @output
+    @render.data_frame
+    def audit_impact_table():
+        df = audit_matrix_df.get()
+        if df is not None and not df.empty:
+            # Format numbers with commas for readability
+            for col in ['Total Points', 'Doubles to Delete', 'Points to Merge', 'Final Points']:
+                if col in df.columns:
+                    df[col] = df[col].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame())
+
+    @output
+    @render.ui
+    def audit_execute_btn_ui():
+        # Only reveal the execute button if the authorization box is checked
+        if input.audit_confirm_check():
+            return ui.input_action_button("run_consolidation_btn", "⚠️ Execute Global Consolidation", class_="btn-danger w-100 mt-3")
         return ui.HTML("")
 
     @reactive.Effect
@@ -276,7 +359,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         
         target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         
-        # Replaces the table with an hourly aggregated version & trims bad data
         consolidation_q = f"""
             CREATE OR REPLACE TABLE `{target_table}` AS
             SELECT 
@@ -301,6 +383,9 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         try:
             client.query(consolidation_q).result()
             ui.notification_show("Consolidation complete! High-frequency data averaged and out-of-bounds data dropped.", type="success", duration=10)
+            # Reset the UI after execution
+            audit_matrix_df.set(None)
+            ui.update_checkbox("audit_confirm_check", value=False)
         except Exception as e:
             ui.notification_show(f"Consolidation failed: {e}", type="error", duration=10)
 
