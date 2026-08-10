@@ -362,20 +362,21 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             for table_name in physical_tables:
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 
-                # Consolidate by hour, drop anomalies, and replace the raw table
+                # Consolidate by hour, drop anomalies, and explicitly retain RSSI
                 consolidation_q = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS
                     SELECT 
                         TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp,
                         NodeNum,
-                        ROUND(AVG(temperature), 1) as temperature
+                        ROUND(AVG(temperature), 1) as temperature,
+                        MAX(rssi) as rssi
                     FROM `{target_table}`
                     WHERE temperature >= -30.0 AND temperature <= 120.0
                     GROUP BY timestamp, NodeNum
                 """
                 client.query(consolidation_q).result()
                 
-            ui.notification_show("Consolidation complete! High-frequency data averaged in physical tables.", type="success", duration=10)
+            ui.notification_show("Consolidation complete! High-frequency data averaged and RSSI retained.", type="success", duration=10)
             
             # Reset the UI after execution
             audit_matrix_df.set(None)
