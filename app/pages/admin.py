@@ -452,23 +452,28 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         if client is None: return
         view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         
-        # Look for anything marked as 'Archived' in the node registry via the view
+        # Look into the Node Registry for Status = 'Archived' and match it to the view
         audit_q = f"""
             SELECT 
-                Project,
-                FORMAT_TIMESTAMP('%Y-%m-%d', MIN(timestamp)) as Start_Date, 
-                FORMAT_TIMESTAMP('%Y-%m-%d', MAX(timestamp)) as End_Date, 
+                v.Project,
+                FORMAT_TIMESTAMP('%Y-%m-%d', MIN(v.timestamp)) as Start_Date, 
+                FORMAT_TIMESTAMP('%Y-%m-%d', MAX(v.timestamp)) as End_Date, 
                 COUNT(*) as Records_to_Archive
-            FROM `{view_table}`
-            WHERE UPPER(SensorStatus) = 'ARCHIVED'
-            GROUP BY Project
-            ORDER BY Project
+            FROM `{view_table}` v
+            WHERE EXISTS (
+                SELECT 1 FROM `{NODE_REGISTRY_TABLE}` r
+                WHERE r.NodeNum = v.NodeNum 
+                  AND r.Project = v.Project
+                  AND UPPER(r.Status) = 'ARCHIVED'
+            )
+            GROUP BY v.Project
+            ORDER BY v.Project
         """
         try:
             df = client.query(audit_q).to_dataframe()
             archive_audit_df.set(df)
             if df.empty:
-                ui.notification_show("No records found with SensorStatus = 'Archived'.", type="warning")
+                ui.notification_show("No records found with Status = 'Archived'.", type="warning")
         except Exception as e:
             ui.notification_show(f"Archive audit failed: {e}", type="error")
             archive_audit_df.set(pd.DataFrame())
@@ -519,45 +524,53 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         physical_tables = ["raw_lord", "raw_sensorpush"]
         
         try:
-            # 1. Insert into Archive directly from the View
+            # 1. Insert into Archive by checking the registry's Status column
             archive_insert_q = f"""
                 INSERT INTO `{archive_table}` 
-                SELECT * FROM `{view_table}` WHERE UPPER(SensorStatus) = 'ARCHIVED'
+                SELECT v.* FROM `{view_table}` v
+                WHERE EXISTS (
+                    SELECT 1 FROM `{NODE_REGISTRY_TABLE}` r
+                    WHERE r.NodeNum = v.NodeNum 
+                      AND r.Project = v.Project
+                      AND UPPER(r.Status) = 'ARCHIVED'
+                )
                 EXCEPT DISTINCT 
                 SELECT * FROM `{archive_table}`
             """
             client.query(archive_insert_q).result()
             
-            # 2. Delete from raw tables using the view as a map
+            # 2. Delete from raw tables using the registry map
             for table_name in physical_tables:
                 raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 delete_raw_q = f"""
                     DELETE FROM `{raw_target}` raw
                     WHERE EXISTS (
                         SELECT 1 FROM `{view_table}` v
+                        JOIN `{NODE_REGISTRY_TABLE}` r ON v.NodeNum = r.NodeNum AND v.Project = r.Project
                         WHERE v.NodeNum = raw.NodeNum 
                           AND v.timestamp = raw.timestamp 
-                          AND UPPER(v.SensorStatus) = 'ARCHIVED'
+                          AND UPPER(r.Status) = 'ARCHIVED'
                     )
                 """
                 client.query(delete_raw_q).result()
 
-            # 3. Delete from manual_rejections
+            # 3. Delete from manual_rejections using the registry map
             delete_rej_q = f"""
                 DELETE FROM `{manual_rej_table}` raw
                 WHERE EXISTS (
                     SELECT 1 FROM `{view_table}` v
+                    JOIN `{NODE_REGISTRY_TABLE}` r ON v.NodeNum = r.NodeNum AND v.Project = r.Project
                     WHERE v.NodeNum = raw.NodeNum 
                       AND v.timestamp = raw.timestamp 
-                      AND UPPER(v.SensorStatus) = 'ARCHIVED'
+                      AND UPPER(r.Status) = 'ARCHIVED'
                 )
             """
             client.query(delete_rej_q).result()
 
-            # 4. Delete from Node Registry 
+            # 4. Delete the successfully archived items from the Node Registry 
             delete_reg_q = f"""
                 DELETE FROM `{NODE_REGISTRY_TABLE}`
-                WHERE UPPER(SensorStatus) = 'ARCHIVED'
+                WHERE UPPER(Status) = 'ARCHIVED'
             """
             client.query(delete_reg_q).result()
                 
