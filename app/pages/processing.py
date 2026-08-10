@@ -39,6 +39,11 @@ def render_data_processing_page(selected_project):
         st.subheader("📄 Manual File Ingestion")
         st.info("Supports: Lord SensorConnect (Wide), Lord SensorCloud (Long), and Native SensorPush formats.")
         
+        # ADDED: Lookback filter configuration
+        lookback_options = {"All Time": None, "Last 3 Days": 3, "Last 7 Days": 7, "Last 14 Days": 14, "Last 30 Days": 30}
+        selected_lookback = st.selectbox("Data Lookback Window", list(lookback_options.keys()), index=0)
+        lookback_days = lookback_options[selected_lookback]
+
         # This line must be indented exactly 8 spaces under 'with tab_upload:'
         u_files = st.file_uploader(
             "Select CSV or Excel files", 
@@ -123,12 +128,19 @@ def render_data_processing_page(selected_project):
                         
                         if not df_processed.empty:
                             df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
-                            all_processed_dfs.append(df_processed)
                             
-                            # Grab the actual parsed node number for the UI message
-                            display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
-                            
-                            st.write(f"✅ {display_name}: {len(df_processed)} records.")
+                            # ADDED: Filter by the selected lookback window
+                            if lookback_days is not None:
+                                cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
+                                df_processed = df_processed[df_processed['timestamp'] >= cutoff_date]
+
+                            if not df_processed.empty:
+                                all_processed_dfs.append(df_processed)
+                                # Grab the actual parsed node number for the UI message
+                                display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
+                                st.write(f"✅ {display_name}: {len(df_processed)} records in target window.")
+                            else:
+                                st.warning(f"⚠️ {f_identifier}: No records found within the last {lookback_days} days.")
                 
                 except Exception as e:
                     st.error(f"❌ Error processing {f.name}: {e}")
@@ -152,7 +164,7 @@ def render_data_processing_page(selected_project):
                         client.load_table_from_dataframe(combined_df[['timestamp', 'NodeNum', 'temperature']], table_id, job_config=job_config).result()
                         st.success("Batch Upload Complete!")
                         st.cache_data.clear()
-
+                        
     # --- TAB 2: EXPORT LOGIC ---
     with tab_export:
         st.subheader("📥 Wide-Format Data Export")
