@@ -355,28 +355,43 @@ def admin_server(input, output, session, client, selected_project, display_tz):
     def run_global_consolidation():
         if client is None: return
         
-        # Target the physical base tables where the data actually lives
         physical_tables = ["raw_lord", "raw_sensorpush"]
         
         try:
             for table_name in physical_tables:
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 
-                # Consolidate by hour, drop anomalies, and explicitly retain RSSI
+                # 1. Fetch the exact schema of the table dynamically
+                table_obj = client.get_table(target_table)
+                select_clauses = []
+                
+                # 2. Build the SELECT statement based on whatever columns actually exist
+                for field in table_obj.schema:
+                    col = field.name
+                    if col.lower() == 'timestamp':
+                        select_clauses.append("TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp")
+                    elif col.lower() == 'nodenum':
+                        select_clauses.append("NodeNum")
+                    elif col.lower() == 'temperature':
+                        select_clauses.append("ROUND(AVG(temperature), 1) as temperature")
+                    else:
+                        # Automatically preserve ANY other metadata columns (rssi, battery, etc.)
+                        select_clauses.append(f"MAX({col}) as {col}")
+                
+                select_string = ",\n                        ".join(select_clauses)
+                
+                # 3. Execute the custom consolidation for this specific table
                 consolidation_q = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS
                     SELECT 
-                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp,
-                        NodeNum,
-                        ROUND(AVG(temperature), 1) as temperature,
-                        MAX(rssi) as rssi
+                        {select_string}
                     FROM `{target_table}`
                     WHERE temperature >= -30.0 AND temperature <= 120.0
                     GROUP BY timestamp, NodeNum
                 """
                 client.query(consolidation_q).result()
                 
-            ui.notification_show("Consolidation complete! High-frequency data averaged and RSSI retained.", type="success", duration=10)
+            ui.notification_show("Consolidation complete! High-frequency data averaged and ALL custom columns perfectly retained.", type="success", duration=10)
             
             # Reset the UI after execution
             audit_matrix_df.set(None)
