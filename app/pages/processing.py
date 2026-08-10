@@ -31,16 +31,18 @@ def processing_ui():
                     accept=['.csv', '.xlsx', '.zip'], 
                     multiple=True
                 ),
+                
+                # Lookback filter placed SAFELY INSIDE the nav_panel
+                ui.input_numeric(
+                    "upload_lookback_days", 
+                    "Days of history to keep (0 to upload all)", 
+                    value=7, 
+                    min=0
+                ),
+                
                 ui.output_ui("upload_preview_ui"),
                 ui.output_ui("commit_upload_ui")
             ),
-            ui.input_numeric(
-                "upload_lookback_days", 
-                "Days of history to keep (0 to upload all)", 
-                value=7, 
-                min=0
-            ),
-            ui.output_ui("upload_preview_ui"),
             
             # --- TAB 2: EXPORT LOGIC ---
             ui.nav_panel("📥 Export Report",
