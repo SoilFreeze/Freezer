@@ -82,20 +82,13 @@ def admin_ui():
                 ui.output_ui("archive_audit_results_ui"),
                 ui.output_ui("archive_impact_results_ui"), # <-- New Impact Matrix Output
                 ui.hr(),
-
-                ui.hr(),
                 ui.h4("⏳ Rolling Time-Based Archive"),
                 ui.markdown("Sweep all active tables and move any telemetry older than the specified threshold into the permanent archive."),
                 ui.layout_columns(
-                    ui.input_numeric(
-                        "history_days", # Your specific ID here might be slightly different
-                        "Days of history to keep:", 
-                        value=14, 
-                        min=1, 
-                        max=30
-                    ),
+                    ui.input_numeric("archive_days_old", "Archive data older than (days):", value=14, min=1), 
                     ui.input_action_button("run_time_archive_btn", "⏳ Execute Rolling Archive", class_="btn-warning mt-4")
                 ),
+                ui.output_ui("time_archive_impact_results_ui"), # <-- New Impact Matrix Output
                          
                 ui.h4("🗄️ Current Archive Inventory"),
                 ui.output_data_frame("current_archive_df_ui"),
@@ -626,6 +619,9 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         except Exception as e:
             ui.notification_show(f"Archival execution failed: {e}", type="error", duration=20)
 
+    # New Reactive Value to hold the time-based before and after counts
+    time_archive_impact_df = reactive.Value(None)
+
     @reactive.Effect
     @reactive.event(input.run_time_archive_btn)
     def execute_time_archival():
@@ -635,10 +631,20 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
         view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-        physical_tables = ["raw_lord", "raw_sensorpush"]
         
         try:
-            # 1. Insert aging data into the archive
+            # --- 1. TAKE "BEFORE" SNAPSHOT ---
+            def get_row_count(table_path):
+                try:
+                    return client.query(f"SELECT COUNT(*) as c FROM `{table_path}`").to_dataframe()['c'].iloc[0]
+                except:
+                    return 0
+                    
+            before_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            before_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            before_rej = get_row_count(manual_rej_table)
+
+            # --- 2. EXECUTE ARCHIVE & PURGE ---
             archive_insert_q = f"""
                 INSERT INTO `{archive_table}` 
                 SELECT v.* FROM `{view_table}` v
@@ -648,8 +654,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             """
             client.query(archive_insert_q).result()
             
-            # 2. Delete aging data from raw tables
-            for table_name in physical_tables:
+            for table_name in ["raw_lord", "raw_sensorpush"]:
                 raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 delete_raw_q = f"""
                     DELETE FROM `{raw_target}`
@@ -657,12 +662,24 @@ def admin_server(input, output, session, client, selected_project, display_tz):
                 """
                 client.query(delete_raw_q).result()
 
-            # 3. Delete aging data from manual_rejections
             delete_rej_q = f"""
                 DELETE FROM `{manual_rej_table}`
                 WHERE timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_old} DAY)
             """
             client.query(delete_rej_q).result()
+            
+            # --- 3. TAKE "AFTER" SNAPSHOT & BUILD MATRIX ---
+            after_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            after_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            after_rej = get_row_count(manual_rej_table)
+            
+            summary_data = {
+                "Table Name": ["raw_lord", "raw_sensorpush", "manual_rejections"],
+                "Before Archive": [before_lord, before_sp, before_rej],
+                "Records Purged": [before_lord - after_lord, before_sp - after_sp, before_rej - after_rej],
+                "Remaining Active": [after_lord, after_sp, after_rej]
+            }
+            time_archive_impact_df.set(pd.DataFrame(summary_data))
                 
             ui.notification_show(f"Success! All data older than {days_old} days has been archived and purged.", type="success", duration=15)
             
@@ -671,36 +688,34 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             
         except Exception as e:
             ui.notification_show(f"Time archival failed: {e}", type="error", duration=20)
-    
+
     # --- 4. RENDER THE IMPACT MATRIX ---
     @output
     @render.ui
-    def archive_impact_results_ui():
-        df = archive_impact_df.get()
+    def time_archive_impact_results_ui():
+        df = time_archive_impact_df.get()
         if df is None or df.empty: return ui.HTML("")
         
         return ui.div(
-            ui.h5("✅ Archival Impact Summary", class_="text-success mt-4"),
-            ui.output_data_frame("archive_impact_table"),
-            ui.input_action_button("clear_impact_btn", "Dismiss Summary", class_="btn-sm btn-outline-secondary mt-2")
+            ui.h5(f"✅ Time-Based Archival Impact Summary", class_="text-success mt-4"),
+            ui.output_data_frame("time_archive_impact_table"),
+            ui.input_action_button("clear_time_impact_btn", "Dismiss Summary", class_="btn-sm btn-outline-secondary mt-2")
         )
 
     @output
     @render.data_frame
-    def archive_impact_table():
-        df = archive_impact_df.get()
+    def time_archive_impact_table():
+        df = time_archive_impact_df.get()
         if df is not None and not df.empty:
-            # Format numbers with commas
             for col in ['Before Archive', 'Records Purged', 'Remaining Active']:
                 df[col] = df[col].apply(lambda x: f"{int(x):,}")
             return render.DataGrid(df, summary=False)
         return render.DataGrid(pd.DataFrame())
 
     @reactive.Effect
-    @reactive.event(input.clear_impact_btn)
-    def dismiss_impact_summary():
-        archive_impact_df.set(None)
-
+    @reactive.event(input.clear_time_impact_btn)
+    def dismiss_time_impact_summary():
+        time_archive_impact_df.set(None)
 
     # --- 3. Bulk Approval & Data Status Change ---
     verify_match_count = reactive.Value(None)
