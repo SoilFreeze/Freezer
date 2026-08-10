@@ -74,13 +74,13 @@ def admin_ui():
                 ui.hr(),
 
                 # --- PROJECT DATA ARCHIVAL ---
-                
                 ui.h3("📦 Project Data Archival"),
                 ui.markdown("Automatically move telemetry marked as **'Archived'** in the Node Registry into the permanent `master_data_archive` table, then purge it from all active ingestion tables (including the registry)."),
                 
                 ui.input_action_button("audit_archive_btn", "🔍 Step 1: Audit Ready-to-Archive Data", class_="btn-outline-secondary w-100 mb-3"),
                 
                 ui.output_ui("archive_audit_results_ui"),
+                ui.output_ui("archive_impact_results_ui"), # <-- New Impact Matrix Output
                 ui.hr(),
                 
                 ui.h4("🗄️ Current Archive Inventory"),
@@ -513,6 +513,9 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             return ui.input_action_button("run_archive_execute_btn", "🚀 Execute Archive & Purge", class_="btn-danger w-100 mt-2")
         return ui.HTML("")
 
+    # New Reactive Value to hold the before and after counts
+    archive_impact_df = reactive.Value(None)
+
     @reactive.Effect
     @reactive.event(input.run_archive_execute_btn)
     def execute_data_archival():
@@ -521,10 +524,22 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
         view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
-        physical_tables = ["raw_lord", "raw_sensorpush"]
         
         try:
-            # 1. Insert into Archive by checking the registry's Status column
+            # --- 1. TAKE "BEFORE" SNAPSHOT ---
+            def get_row_count(table_path):
+                try:
+                    return client.query(f"SELECT COUNT(*) as c FROM `{table_path}`").to_dataframe()['c'].iloc[0]
+                except:
+                    return 0
+                    
+            before_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            before_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            before_rej = get_row_count(manual_rej_table)
+
+            # --- 2. EXECUTE ARCHIVE & PURGE ---
+            
+            # Insert into Archive by checking the registry's Status column
             archive_insert_q = f"""
                 INSERT INTO `{archive_table}` 
                 SELECT v.* FROM `{view_table}` v
@@ -539,8 +554,8 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             """
             client.query(archive_insert_q).result()
             
-            # 2. Delete from raw tables using the registry map
-            for table_name in physical_tables:
+            # Delete from raw tables using the registry map
+            for table_name in ["raw_lord", "raw_sensorpush"]:
                 raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 delete_raw_q = f"""
                     DELETE FROM `{raw_target}` raw
@@ -554,7 +569,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
                 """
                 client.query(delete_raw_q).result()
 
-            # 3. Delete from manual_rejections using the registry map
+            # Delete from manual_rejections using the registry map
             delete_rej_q = f"""
                 DELETE FROM `{manual_rej_table}` raw
                 WHERE EXISTS (
@@ -567,12 +582,25 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             """
             client.query(delete_rej_q).result()
 
-            # 4. Delete the successfully archived items from the Node Registry 
+            # Delete the successfully archived items from the Node Registry 
             delete_reg_q = f"""
                 DELETE FROM `{NODE_REGISTRY_TABLE}`
                 WHERE UPPER(Status) = 'ARCHIVED'
             """
             client.query(delete_reg_q).result()
+            
+            # --- 3. TAKE "AFTER" SNAPSHOT & BUILD MATRIX ---
+            after_lord = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_lord")
+            after_sp = get_row_count(f"{PROJECT_ID}.{DATASET_ID}.raw_sensorpush")
+            after_rej = get_row_count(manual_rej_table)
+            
+            summary_data = {
+                "Table Name": ["raw_lord", "raw_sensorpush", "manual_rejections"],
+                "Before Archive": [before_lord, before_sp, before_rej],
+                "Records Purged": [before_lord - after_lord, before_sp - after_sp, before_rej - after_rej],
+                "Remaining Active": [after_lord, after_sp, after_rej]
+            }
+            archive_impact_df.set(pd.DataFrame(summary_data))
                 
             ui.notification_show("Success! Data has been archived and purged.", type="success", duration=15)
             
@@ -583,6 +611,35 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             
         except Exception as e:
             ui.notification_show(f"Archival execution failed: {e}", type="error", duration=20)
+
+    # --- 4. RENDER THE IMPACT MATRIX ---
+    @output
+    @render.ui
+    def archive_impact_results_ui():
+        df = archive_impact_df.get()
+        if df is None or df.empty: return ui.HTML("")
+        
+        return ui.div(
+            ui.h5("✅ Archival Impact Summary", class_="text-success mt-4"),
+            ui.output_data_frame("archive_impact_table"),
+            ui.input_action_button("clear_impact_btn", "Dismiss Summary", class_="btn-sm btn-outline-secondary mt-2")
+        )
+
+    @output
+    @render.data_frame
+    def archive_impact_table():
+        df = archive_impact_df.get()
+        if df is not None and not df.empty:
+            # Format numbers with commas
+            for col in ['Before Archive', 'Records Purged', 'Remaining Active']:
+                df[col] = df[col].apply(lambda x: f"{int(x):,}")
+            return render.DataGrid(df, summary=False)
+        return render.DataGrid(pd.DataFrame())
+
+    @reactive.Effect
+    @reactive.event(input.clear_impact_btn)
+    def dismiss_impact_summary():
+        archive_impact_df.set(None)
 
 
     # --- 3. Bulk Approval & Data Status Change ---
