@@ -228,7 +228,131 @@ def admin_server(input, output, session, client, selected_project, display_tz):
                 "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"
             })
         return render.DataGrid(pd.DataFrame(rows))
+    # =========================================================================
+    # TAB 2: BULK APPROVAL & VERIFICATION LOGIC
+    # =========================================================================
+    verify_match_count = reactive.Value(None)
+    constructed_where_clause = reactive.Value(None)
+    
+    # --- 1. Dynamic UI Renderers ---
+    @output
+    @render.ui
+    def blk_scope_ui():
+        scope = input.blk_target_scope()
+        return ui.input_text("blk_scope_val", f"Enter {scope} ID/Name:")
 
+    @output
+    @render.ui
+    def blk_temporal_ui():
+        temp_dir = input.blk_temp_dir()
+        if temp_dir == "Between Range":
+            return ui.layout_columns(
+                ui.input_date("blk_start_date", "Start Date"),
+                ui.input_date("blk_end_date", "End Date")
+            )
+        else:
+            return ui.input_date("blk_single_date", "Target Date")
+
+    # --- 2. Verification & Match Lookup ---
+    @reactive.Effect
+    @reactive.event(input.blk_verify_btn)
+    def verify_bulk_action():
+        if client is None: return
+        
+        where_parts = []
+        
+        # Scope Filter
+        scope = input.blk_target_scope()
+        scope_val = input.blk_scope_val()
+        if scope_val:
+            if scope == "Project Wide":
+                where_parts.append(f"Project LIKE '{scope_val.strip()}%'")
+            elif scope == "Specific Location":
+                where_parts.append(f"UPPER(Location) = '{scope_val.strip().upper()}'")
+            elif scope == "Specific Node":
+                where_parts.append(f"UPPER(NodeNum) = '{scope_val.strip().upper()}'")
+                
+        # Status Filter
+        curr_status = input.blk_current_status()
+        if curr_status == "ALL BUT NULL":
+            where_parts.append("approval_status IS NOT NULL")
+        elif curr_status == "NULL (STREAMING / UNREVIEWED)":
+            where_parts.append("approval_status IS NULL")
+        elif curr_status != "ALL":
+            where_parts.append(f"UPPER(approval_status) = '{curr_status}'")
+            
+        # Temporal Filter
+        temp_dir = input.blk_temp_dir()
+        if temp_dir == "Between Range":
+            where_parts.append(f"timestamp >= '{input.blk_start_date()} 00:00:00' AND timestamp <= '{input.blk_end_date()} 23:59:59'")
+        elif temp_dir == "Older Than":
+            where_parts.append(f"timestamp < '{input.blk_single_date()} 00:00:00'")
+        elif temp_dir == "Newer Than":
+            where_parts.append(f"timestamp > '{input.blk_single_date()} 23:59:59'")
+            
+        # Value Filter
+        val_filt = input.blk_val_filter()
+        thresh = input.blk_threshold()
+        if val_filt == "Above Threshold":
+            where_parts.append(f"temperature > {thresh}")
+        elif val_filt == "Below Threshold":
+            where_parts.append(f"temperature < {thresh}")
+            
+        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+        constructed_where_clause.set(where_clause)
+        
+        # Execute Count Query
+        try:
+            target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2" # Adjust table name if needed
+            q = f"SELECT COUNT(*) as match_count FROM `{target_table}` WHERE {where_clause}"
+            df = client.query(q).to_dataframe()
+            verify_match_count.set(int(df['match_count'].iloc[0]))
+        except Exception as e:
+            verify_match_count.set(f"Error: {e}")
+
+    # --- 3. Render Verification Results ---
+    @output
+    @render.ui
+    def blk_verify_results_ui():
+        count = verify_match_count.get()
+        if count is None: return ui.HTML("")
+        
+        if isinstance(count, str) and count.startswith("Error"):
+            return ui.p(count, class_="text-danger")
+            
+        return ui.div(
+            ui.h4(f"📊 Match Found: {count:,} records", class_="text-success"),
+            ui.p(f"These records will be set to: '{input.blk_new_status()}'")
+        )
+        
+    @output
+    @render.ui
+    def blk_execute_btn_ui():
+        count = verify_match_count.get()
+        if input.blk_confirm_check() and isinstance(count, int) and count > 0:
+            return ui.input_action_button("blk_execute_btn", "⚠️ EXECUTE BULK UPDATE", class_="btn-danger w-100")
+        return ui.HTML("")
+
+    # --- 4. Execute the Bulk Update ---
+    @reactive.Effect
+    @reactive.event(input.blk_execute_btn)
+    def execute_bulk_update():
+        where_clause = constructed_where_clause.get()
+        new_status = input.blk_new_status()
+        
+        if not where_clause or client is None: return
+        
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        update_q = f"UPDATE `{target_table}` SET approval_status = '{new_status}' WHERE {where_clause}"
+        
+        try:
+            client.query(update_q).result()
+            ui.notification_show("Bulk update successful!", type="success")
+            verify_match_count.set(None) 
+            ui.update_checkbox("blk_confirm_check", value=False)
+        except Exception as e:
+            ui.notification_show(f"Update failed: {e}", type="error")
+            
     # --- TAB 4: PROJECT MASTER LOGIC ---
     @output
     @render.data_frame
