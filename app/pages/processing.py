@@ -34,6 +34,13 @@ def processing_ui():
                 ui.output_ui("upload_preview_ui"),
                 ui.output_ui("commit_upload_ui")
             ),
+            ui.input_numeric(
+                "upload_lookback_days", 
+                "Days of history to keep (0 to upload all)", 
+                value=7, 
+                min=0
+            ),
+            ui.output_ui("upload_preview_ui"),
             
             # --- TAB 2: EXPORT LOGIC ---
             ui.nav_panel("📥 Export Report",
@@ -170,11 +177,24 @@ def processing_server(input, output, session, client, selected_project):
                             df_processed['NodeNum'] = clean_node_num
                             target_tbl = "raw_sensorpush"
                     
-                    if not df_processed.empty:
-                        df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
-                        all_dfs.append(df_processed)
-                        display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
-                        msgs.append(f"✅ {display_name}: {len(df_processed)} records.")
+                    # 2. PROCESS df_raw -> df_processed
+                    # ... (keep your existing parsing logic) ...
+                    
+                        if not df_processed.empty:
+                            df_processed = df_processed.dropna(subset=['timestamp', 'temperature'])
+                            
+                            # --- NEW LOOKBACK FILTER ---
+                            lookback = input.upload_lookback_days()
+                            if lookback > 0:
+                                latest_time = df_processed['timestamp'].max()
+                                cutoff_time = latest_time - pd.Timedelta(days=lookback)
+                                df_processed = df_processed[df_processed['timestamp'] >= cutoff_time]
+                            # ---------------------------
+                            
+                            if not df_processed.empty:
+                                all_dfs.append(df_processed)
+                                display_name = df_processed['NodeNum'].iloc[0] if 'NodeNum' in df_processed.columns else f_identifier
+                                msgs.append(f"✅ {display_name}: {len(df_processed)} records.")
             
             except Exception as e:
                 msgs.append(f"❌ Error processing {f_name}: {e}")
