@@ -182,7 +182,40 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             GROUP BY 1,2,3,4 ORDER BY p.Project ASC
         """
         return client.query(sum_q).to_dataframe()
-
+    @reactive.Effect
+    @reactive.event(input.run_consolidation_btn)
+    def run_global_consolidation():
+        if client is None: return
+        
+        target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        
+        # This replaces the table with an hourly aggregated version of itself
+        consolidation_q = f"""
+            CREATE OR REPLACE TABLE `{target_table}` AS
+            SELECT 
+                TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp,
+                NodeNum,
+                MAX(Project) as Project,
+                MAX(Location) as Location,
+                MAX(Bank) as Bank,
+                MAX(Depth) as Depth,
+                MAX(Phase) as Phase,
+                MAX(System) as System,
+                MAX(Hardware) as Hardware,
+                MAX(approval_status) as approval_status,
+                MAX(BaseElevation) as BaseElevation,
+                MAX(node_elevation) as node_elevation,
+                ROUND(AVG(temperature), 1) as temperature
+            FROM `{target_table}`
+            GROUP BY timestamp, NodeNum
+        """
+        
+        try:
+            client.query(consolidation_q).result()
+            ui.notification_show("Consolidation complete! High-frequency data has been averaged.", type="success")
+        except Exception as e:
+            ui.notification_show(f"Consolidation failed: {e}", type="error")
+            
     # --- TAB 1: ADMIN SUMMARY LOGIC ---
     @output
     @render.data_frame
@@ -231,6 +264,11 @@ def admin_server(input, output, session, client, selected_project, display_tz):
     # =========================================================================
     # TAB 2: BULK APPROVAL & VERIFICATION LOGIC
     # =========================================================================
+    ui.hr(),
+    ui.h4("🧹 System-Wide Consolidation"),
+    ui.p("This will permanently compress high-frequency data into 1-hour averages and round temperatures to 1 decimal place."),
+    ui.input_action_button("run_consolidation_btn", "🔄 Run Global Consolidation Job", class_="btn-warning w-100")
+    
     verify_match_count = reactive.Value(None)
     constructed_where_clause = reactive.Value(None)
     
