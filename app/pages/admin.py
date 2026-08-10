@@ -49,17 +49,8 @@ def admin_ui():
         ui.h2("🛠️ Admin Tools"),
         
         ui.navset_card_tab(
-            # --- TAB 1: ADMIN SUMMARY ---
-            ui.nav_panel("📋 Admin Summary",
-                ui.h3("📋 Centralized Infrastructure Status Overview"),
-                ui.h4("📡 Hardware Inventory Fleet Breakdown"),
-                ui.output_data_frame("fleet_breakdown_df"),
-                ui.hr(),
-                ui.h4("🏗️ Active Deployment Overview Matrix"),
-                ui.output_data_frame("deployment_overview_df")
-            ),
             
-            # --- TAB 2: BULK APPROVAL & CLEANUP ---
+            # --- TAB 1: BULK APPROVAL & CLEANUP ---
             ui.nav_panel("⚡ Bulk Approval",
                 ui.h2("⚡ Bulk Approval and Database Maintenance"),
                 ui.hr(),
@@ -110,7 +101,7 @@ def admin_ui():
                 ui.output_ui("blk_execute_btn_ui")
             ),
 
-            # --- TAB 3: DATA ARCHIVAL ---
+            # --- TAB 2: DATA ARCHIVAL ---
             ui.nav_panel("📦 Data Archival",
                 ui.h2("📦 Data Archival Engine"),
                 ui.hr(),
@@ -139,39 +130,24 @@ def admin_ui():
                 ui.h4("🗄️ Current Archive Inventory"),
                 ui.output_data_frame("current_archive_df_ui")
             ),
-            
-            # --- TAB 4: DATA RECOVERY ---
-            ui.nav_panel("📡 Data Recovery",
-                ui.h3("📡 Data Recovery Engine"),
-                ui.p("Extract raw chronological data streams directly from the SensorPush Cloud API architecture."),
+
+            # --- TAB 3: ADMIN SUMMARY ---
+            ui.nav_panel("📋 Admin Summary",
+                ui.h3("📋 Centralized Infrastructure Status Overview"),
+                ui.h4("📡 Hardware Inventory Fleet Breakdown"),
+                ui.output_data_frame("fleet_breakdown_df"),
                 ui.hr(),
-                
-                ui.layout_columns(
-                    ui.output_ui("rec_proj_ui"),
-                    ui.output_ui("rec_loc_ui"),
-                    ui.output_ui("rec_node_ui")
-                ),
-                ui.hr(),
-                
-                ui.h4("📅 Define Recovery Timeline Parameters"),
-                ui.layout_columns(
-                    ui.input_date("rec_start_date", "Extraction Window Start Date"),
-                    ui.input_date("rec_end_date", "Extraction Window End Date")
-                ),
-                ui.hr(),
-                
-                ui.output_ui("rec_warning_banner"),
-                ui.input_action_button("rec_execute_btn", "🚀 Execute Cloud Backfill Ingestion Pipeline Run", class_="btn-danger w-100"),
-                ui.output_ui("rec_results_ui")
+                ui.h4("🏗️ Active Deployment Overview Matrix"),
+                ui.output_data_frame("deployment_overview_df")
             ),
             
-            # --- TAB 5: PROJECT MASTER ---
+            # --- TAB 4: PROJECT MASTER ---
             ui.nav_panel("⚙️ Project Master",
                 ui.h3("🗄️ Complete Master Project Lifecycle Directory"),
                 ui.output_data_frame("project_master_df")
             ),
             
-            # --- TAB 6: PIPE MAPPER ---
+            # --- TAB 5: PIPE MAPPER ---
             ui.nav_panel("🗺️ Pipe Mapper",
                 ui.h3("🗺️ As-Built Pipe Mapper"),
                 ui.p("Select a site plan to log X/Y pixel coordinates for physical locations."),
@@ -232,58 +208,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         return client.query(sum_q).to_dataframe()
 
     # =========================================================================
-    # TAB 1: ADMIN SUMMARY LOGIC
-    # =========================================================================
-    @output
-    @render.data_frame
-    def fleet_breakdown_df():
-        reg_df = get_full_registry()
-        if reg_df.empty: return pd.DataFrame()
-        
-        def classify_family(node): 
-            return "Lord" if "-ch" in str(node).lower() else "SP" if str(node).lower().startswith("sp") else "TP" if str(node).lower().startswith("tp") else "Other"
-        
-        fleet_df = reg_df.copy()
-        fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_family)
-        fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
-        
-        deduped = fleet_df.sort_values(by=['Parent ID']).drop_duplicates(subset=['Parent ID']).copy()
-        
-        if 'Inventory_Status' not in deduped.columns:
-            deduped['Inventory_Status'] = 'On Project'
-            
-        pivot = deduped.groupby(['Hardware Family', 'Inventory_Status']).size().unstack(fill_value=0).reindex(["TP", "SP", "Lord", "Other"], fill_value=0)
-        
-        for col in ["Available", "Dead", "Diagnostic", "On Project"]: 
-            if col not in pivot.columns: pivot[col] = 0
-            
-        pivot = pivot[["Available", "Dead", "Diagnostic", "On Project"]]
-        pivot['Total Units'] = pivot.sum(axis=1)
-        return render.DataGrid(pivot.reset_index())
-
-    @output
-    @render.data_frame
-    def deployment_overview_df():
-        matrix_df = get_fleet_matrix()
-        if matrix_df.empty: return pd.DataFrame()
-        
-        rows = []
-        current_tz = display_tz() if callable(display_tz) else display_tz 
-        
-        for _, r in matrix_df.iterrows():
-            elapsed = max(0, (pd.Timestamp.now(tz=current_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
-            rows.append({
-                "Project ID": r['Project'], 
-                "Project Name": r['ProjectName'] or r['Project'], 
-                "Mapped Sensors": int(r['Mapped_Sensors']), 
-                "Active (6h)": int(r['Active_6h']), 
-                "Active (24h)": int(r['Active_24h']), 
-                "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"
-            })
-        return render.DataGrid(pd.DataFrame(rows))
-
-    # =========================================================================
-    # TAB 2: BULK APPROVAL & DATABASE MAINTENANCE
+    # TAB 1: BULK APPROVAL & DATABASE MAINTENANCE
     # =========================================================================
     
     # --- 1. Global Database Cleanup (Consolidation) ---
@@ -569,7 +494,7 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             ui.notification_show(f"Override update failed: {e}", type="error", duration=15)
 
     # =========================================================================
-    # TAB 3: DATA ARCHIVAL LOGIC
+    # TAB 2: DATA ARCHIVAL LOGIC
     # =========================================================================
     
     # --- Live Archive Inventory Table ---
@@ -889,7 +814,58 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         time_archive_impact_df.set(None)
 
     # =========================================================================
-    # TAB 4 & BEYOND: REMAINING LOGIC
+    # TAB 3: ADMIN SUMMARY LOGIC
+    # =========================================================================
+    @output
+    @render.data_frame
+    def fleet_breakdown_df():
+        reg_df = get_full_registry()
+        if reg_df.empty: return pd.DataFrame()
+        
+        def classify_family(node): 
+            return "Lord" if "-ch" in str(node).lower() else "SP" if str(node).lower().startswith("sp") else "TP" if str(node).lower().startswith("tp") else "Other"
+        
+        fleet_df = reg_df.copy()
+        fleet_df['Hardware Family'] = fleet_df['NodeNum'].apply(classify_family)
+        fleet_df['Parent ID'] = fleet_df['NodeNum'].apply(lambda x: re.split(r'(?i)-ch', str(x))[0] if "-ch" in str(x).lower() else x)
+        
+        deduped = fleet_df.sort_values(by=['Parent ID']).drop_duplicates(subset=['Parent ID']).copy()
+        
+        if 'Inventory_Status' not in deduped.columns:
+            deduped['Inventory_Status'] = 'On Project'
+            
+        pivot = deduped.groupby(['Hardware Family', 'Inventory_Status']).size().unstack(fill_value=0).reindex(["TP", "SP", "Lord", "Other"], fill_value=0)
+        
+        for col in ["Available", "Dead", "Diagnostic", "On Project"]: 
+            if col not in pivot.columns: pivot[col] = 0
+            
+        pivot = pivot[["Available", "Dead", "Diagnostic", "On Project"]]
+        pivot['Total Units'] = pivot.sum(axis=1)
+        return render.DataGrid(pivot.reset_index())
+
+    @output
+    @render.data_frame
+    def deployment_overview_df():
+        matrix_df = get_fleet_matrix()
+        if matrix_df.empty: return pd.DataFrame()
+        
+        rows = []
+        current_tz = display_tz() if callable(display_tz) else display_tz 
+        
+        for _, r in matrix_df.iterrows():
+            elapsed = max(0, (pd.Timestamp.now(tz=current_tz).date() - pd.to_datetime(r['Date_Freezedown']).date()).days) if pd.notnull(r['Date_Freezedown']) else 0
+            rows.append({
+                "Project ID": r['Project'], 
+                "Project Name": r['ProjectName'] or r['Project'], 
+                "Mapped Sensors": int(r['Mapped_Sensors']), 
+                "Active (6h)": int(r['Active_6h']), 
+                "Active (24h)": int(r['Active_24h']), 
+                "Project Status Timeline": f"Day {elapsed} of {str(r['ProjectStatus']).title()}" if pd.notnull(r['Date_Freezedown']) else "Not Freezing"
+            })
+        return render.DataGrid(pd.DataFrame(rows))
+
+    # =========================================================================
+    # TAB 4: PROJECT MASTER LOGIC
     # =========================================================================
     @output
     @render.data_frame
@@ -905,7 +881,9 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         """
         return render.DataGrid(client.query(directory_q).to_dataframe())
 
-    # --- Pipe Mapper Logic ---
+    # =========================================================================
+    # TAB 5: PIPE MAPPER LOGIC
+    # =========================================================================
     mapped_pipes_df = reactive.Value(pd.DataFrame(columns=['Location', 'Map_X', 'Map_Y']))
     
     @output
