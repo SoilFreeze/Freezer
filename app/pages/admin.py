@@ -490,9 +490,8 @@ def admin_server(input, output, session, client, selected_project, display_tz):
 
     @reactive.Effect
     @reactive.event(input.blk_execute_btn)
-    def @reactive.Effect
-    @reactive.event(input.blk_execute_btn)
-    def execute_bulk_update():
+    def execute_some_function(): 
+    # (Your logic here)
         where_clause = constructed_where_clause.get()
         new_status = input.blk_new_status()
         
