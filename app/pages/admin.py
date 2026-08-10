@@ -478,16 +478,6 @@ def execute_bulk_approval_workspace(client, full_reg_df, selected_project):
             except Exception as e:
                 st.error(f"Execution Error: {e}")
                 st.code(sql, language="sql")
-                
-                st.success(f"✅ Reclassification successful! Explicitly stamped '{new_status}' on {job.num_dml_affected_rows:,} records.")
-                st.cache_data.clear()
-                run_profile_audit() # Refresh data metrics locally
-                st.balloons()
-                time.sleep(1.0)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Execution Error: {e}")
-                st.code(sql, language="sql")
 
 def save_status_to_bigquery(project_id, node_num, timestamp, new_status):
     """Executes a proper database commit to write approvals, rejections, or BADDATA flags."""
