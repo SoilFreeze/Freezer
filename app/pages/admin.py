@@ -219,8 +219,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         
         deduped = fleet_df.sort_values(by=['Parent ID']).drop_duplicates(subset=['Parent ID']).copy()
         
-        # FIX: SensorStatus dictates data limits, not physical inventory status. 
-        # Grouping by a placeholder 'Inventory_Status' (or falling back to 'On Project' if missing)
         if 'Inventory_Status' not in deduped.columns:
             deduped['Inventory_Status'] = 'On Project'
             
@@ -357,37 +355,34 @@ def admin_server(input, output, session, client, selected_project, display_tz):
     def run_global_consolidation():
         if client is None: return
         
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
-        
-        consolidation_q = f"""
-            CREATE OR REPLACE TABLE `{target_table}` AS
-            SELECT 
-                TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp,
-                NodeNum,
-                MAX(Project) as Project,
-                MAX(Location) as Location,
-                MAX(Bank) as Bank,
-                MAX(Depth) as Depth,
-                MAX(Phase) as Phase,
-                MAX(System) as System,
-                MAX(Hardware) as Hardware,
-                MAX(approval_status) as approval_status,
-                MAX(BaseElevation) as BaseElevation,
-                MAX(node_elevation) as node_elevation,
-                ROUND(AVG(temperature), 1) as temperature
-            FROM `{target_table}`
-            WHERE temperature >= -30.0 AND temperature <= 120.0
-            GROUP BY timestamp, NodeNum
-        """
+        # Target the physical base tables where the data actually lives
+        physical_tables = ["raw_lord", "raw_sensorpush"]
         
         try:
-            client.query(consolidation_q).result()
-            ui.notification_show("Consolidation complete! High-frequency data averaged and out-of-bounds data dropped.", type="success", duration=10)
+            for table_name in physical_tables:
+                target_table = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+                
+                # Consolidate by hour, drop anomalies, and replace the raw table
+                consolidation_q = f"""
+                    CREATE OR REPLACE TABLE `{target_table}` AS
+                    SELECT 
+                        TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp,
+                        NodeNum,
+                        ROUND(AVG(temperature), 1) as temperature
+                    FROM `{target_table}`
+                    WHERE temperature >= -30.0 AND temperature <= 120.0
+                    GROUP BY timestamp, NodeNum
+                """
+                client.query(consolidation_q).result()
+                
+            ui.notification_show("Consolidation complete! High-frequency data averaged in physical tables.", type="success", duration=10)
+            
             # Reset the UI after execution
             audit_matrix_df.set(None)
             ui.update_checkbox("audit_confirm_check", value=False)
+            
         except Exception as e:
-            ui.notification_show(f"Consolidation failed: {e}", type="error", duration=10)
+            ui.notification_show(f"Consolidation failed: {e}", type="error", duration=15)
 
     # --- 2. Bulk Approval & Data Status Change ---
     verify_match_count = reactive.Value(None)
@@ -489,9 +484,8 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         return ui.HTML("")
 
     @reactive.Effect
-    @reactive.event(input.some_button)
-    def execute_some_function(): 
-    # (Your logic here)
+    @reactive.event(input.blk_execute_btn)
+    def execute_bulk_update():
         where_clause = constructed_where_clause.get()
         new_status = input.blk_new_status()
         
@@ -526,21 +520,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             
         except Exception as e:
             ui.notification_show(f"Override update failed: {e}", type="error", duration=15)
-        where_clause = constructed_where_clause.get()
-        new_status = input.blk_new_status()
-        
-        if not where_clause or client is None: return
-        
-        target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
-        update_q = f"UPDATE `{target_table}` SET approval_status = '{new_status}' WHERE {where_clause}"
-        
-        try:
-            client.query(update_q).result()
-            ui.notification_show("Bulk update successful!", type="success")
-            verify_match_count.set(None) 
-            ui.update_checkbox("blk_confirm_check", value=False)
-        except Exception as e:
-            ui.notification_show(f"Update failed: {e}", type="error")
             
     # =========================================================================
     # TAB 4: PROJECT MASTER LOGIC
