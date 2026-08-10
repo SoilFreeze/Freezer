@@ -72,6 +72,16 @@ def admin_ui():
                 ui.output_ui("audit_results_ui"),
                 
                 ui.hr(),
+
+                # --- PROJECT DATA ARCHIVAL ---
+                ui.h3("📦 Project Data Archival"),
+                ui.markdown("Move a completed project's telemetry into the permanent `master_data_archive` table and purge it from the active ingestion tables. *This flattens the data and safely removes it from the relational tables to keep the system fast.*"),
+                
+                ui.layout_columns(
+                    ui.input_text("archive_target_proj", "Root Project ID to Archive (e.g., 2527):"),
+                    ui.input_action_button("run_archive_btn", "📦 Execute Archive & Purge", class_="btn-warning mt-4")
+                ),
+                ui.hr(),
                 
                 # --- BULK APPROVAL AND DATA STATUS CHANGE ---
                 ui.h3("⚡ Bulk Approval and Data Status Change"),
@@ -265,7 +275,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         if client is None: return
         target_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         
-        # This query calculates the exact impact of grouping by hour
         audit_q = f"""
             WITH BaseData AS (
                 SELECT 
@@ -299,7 +308,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         try:
             df = client.query(audit_q).to_dataframe()
             
-            # Generate the "Combined Total" footer row
             if not df.empty:
                 total_row = pd.DataFrame({
                     'Table': ['Combined Total'],
@@ -335,7 +343,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
     def audit_impact_table():
         df = audit_matrix_df.get()
         if df is not None and not df.empty:
-            # Format numbers with commas for readability
             for col in ['Total Points', 'Doubles to Delete', 'Points to Merge', 'Final Points']:
                 if col in df.columns:
                     df[col] = df[col].apply(lambda x: f"{int(x):,}")
@@ -345,7 +352,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
     @output
     @render.ui
     def audit_execute_btn_ui():
-        # Only reveal the execute button if the authorization box is checked
         if input.audit_confirm_check():
             return ui.input_action_button("run_consolidation_btn", "⚠️ Execute Global Consolidation", class_="btn-danger w-100 mt-3")
         return ui.HTML("")
@@ -361,26 +367,24 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             for table_name in physical_tables:
                 target_table = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
                 
-                # 1. Fetch the exact schema of the table dynamically
                 table_obj = client.get_table(target_table)
                 select_clauses = []
                 
-                # 2. Build the SELECT statement based on whatever columns actually exist
                 for field in table_obj.schema:
                     col = field.name
-                    if col.lower() == 'timestamp':
+                    col_lower = col.lower()
+                    
+                    if col_lower == 'timestamp':
                         select_clauses.append("TIMESTAMP_TRUNC(timestamp, HOUR) as timestamp")
-                    elif col.lower() == 'nodenum':
+                    elif col_lower == 'nodenum':
                         select_clauses.append("NodeNum")
-                    elif col.lower() == 'temperature':
-                        select_clauses.append("ROUND(AVG(temperature), 1) as temperature")
+                    elif col_lower == 'temperature':
+                        select_clauses.append("ROUND(CAST(AVG(temperature) AS FLOAT64), 1) as temperature")
                     else:
-                        # Automatically preserve ANY other metadata columns (rssi, battery, etc.)
-                        select_clauses.append(f"MAX({col}) as {col}")
+                        select_clauses.append(f"MAX(CAST({col} AS FLOAT64)) as {col}")
                 
                 select_string = ",\n                        ".join(select_clauses)
                 
-                # 3. Execute the custom consolidation for this specific table
                 consolidation_q = f"""
                     CREATE OR REPLACE TABLE `{target_table}` AS
                     SELECT 
@@ -391,16 +395,80 @@ def admin_server(input, output, session, client, selected_project, display_tz):
                 """
                 client.query(consolidation_q).result()
                 
-            ui.notification_show("Consolidation complete! High-frequency data averaged and ALL custom columns perfectly retained.", type="success", duration=10)
+            ui.notification_show("Consolidation complete! Tables safely averaged and structured.", type="success", duration=10)
             
-            # Reset the UI after execution
             audit_matrix_df.set(None)
             ui.update_checkbox("audit_confirm_check", value=False)
             
         except Exception as e:
             ui.notification_show(f"Consolidation failed: {e}", type="error", duration=15)
 
-    # --- 2. Bulk Approval & Data Status Change ---
+    # --- 2. Project Data Archival ---
+    @reactive.Effect
+    @reactive.event(input.run_archive_btn)
+    def run_data_archival():
+        if client is None: return
+        proj_id = input.archive_target_proj().strip()
+        
+        if not proj_id:
+            ui.notification_show("Please enter a valid project root ID.", type="warning")
+            return
+            
+        archive_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_archive"
+        view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
+        manual_rej_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
+        physical_tables = ["raw_lord", "raw_sensorpush"]
+        
+        try:
+            # Step 1: Capture the fully denormalized active data into the archive.
+            archive_insert_q = f"""
+                INSERT INTO `{archive_table}` 
+                SELECT * FROM `{view_table}` WHERE Project LIKE '{proj_id}%'
+                EXCEPT DISTINCT 
+                SELECT * FROM `{archive_table}` WHERE Project LIKE '{proj_id}%'
+            """
+            client.query(archive_insert_q).result()
+            
+            # Step 2: Delete from raw tables based on timestamps/nodes safely in the archive
+            for table_name in physical_tables:
+                raw_target = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+                delete_raw_q = f"""
+                    DELETE FROM `{raw_target}` raw
+                    WHERE EXISTS (
+                        SELECT 1 FROM `{archive_table}` arc 
+                        WHERE arc.NodeNum = raw.NodeNum 
+                          AND arc.timestamp = raw.timestamp 
+                          AND arc.Project LIKE '{proj_id}%'
+                    )
+                """
+                client.query(delete_raw_q).result()
+
+            # Step 3: Delete from manual_rejections table
+            delete_rej_q = f"""
+                DELETE FROM `{manual_rej_table}` raw
+                WHERE EXISTS (
+                    SELECT 1 FROM `{archive_table}` arc 
+                    WHERE arc.NodeNum = raw.NodeNum 
+                      AND arc.timestamp = raw.timestamp 
+                      AND arc.Project LIKE '{proj_id}%'
+                )
+            """
+            client.query(delete_rej_q).result()
+
+            # Step 4: Delete the project mappings from the Node Registry
+            delete_reg_q = f"""
+                DELETE FROM `{NODE_REGISTRY_TABLE}`
+                WHERE Project LIKE '{proj_id}%'
+            """
+            client.query(delete_reg_q).result()
+                
+            ui.notification_show(f"Success! Project {proj_id} has been fully flattened into the archive and purged from active tables.", type="success", duration=15)
+            
+        except Exception as e:
+            ui.notification_show(f"Archival failed: {e}", type="error", duration=20)
+
+
+    # --- 3. Bulk Approval & Data Status Change ---
     verify_match_count = reactive.Value(None)
     constructed_where_clause = reactive.Value(None)
     
@@ -429,7 +497,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         
         where_parts = []
         
-        # Scope Filter
         scope = input.blk_target_scope()
         scope_val = input.blk_scope_val()
         if scope_val:
@@ -440,7 +507,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             elif scope == "Specific Node":
                 where_parts.append(f"UPPER(NodeNum) = '{scope_val.strip().upper()}'")
                 
-        # Status Filter
         curr_status = input.blk_current_status()
         if curr_status == "ALL BUT NULL":
             where_parts.append("approval_status IS NOT NULL")
@@ -449,7 +515,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         elif curr_status != "ALL":
             where_parts.append(f"UPPER(approval_status) = '{curr_status}'")
             
-        # Temporal Filter
         temp_dir = input.blk_temp_dir()
         if temp_dir == "Between Range":
             where_parts.append(f"timestamp >= '{input.blk_start_date()} 00:00:00' AND timestamp <= '{input.blk_end_date()} 23:59:59'")
@@ -458,7 +523,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         elif temp_dir == "Newer Than":
             where_parts.append(f"timestamp > '{input.blk_single_date()} 23:59:59'")
             
-        # Value Filter
         val_filt = input.blk_val_filter()
         thresh = input.blk_threshold()
         if val_filt == "Above Threshold":
@@ -510,7 +574,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         view_table = f"{PROJECT_ID}.{DATASET_ID}.master_data_view_v2"
         rejections_table = f"{PROJECT_ID}.{DATASET_ID}.manual_rejections"
         
-        # MERGE ensures we update existing overrides or insert new ones without duplicating
         merge_q = f"""
             MERGE `{rejections_table}` T
             USING (
@@ -530,7 +593,6 @@ def admin_server(input, output, session, client, selected_project, display_tz):
             client.query(merge_q).result()
             ui.notification_show("Successfully logged status overrides to manual_rejections!", type="success", duration=8)
             
-            # Reset the UI after execution
             verify_match_count.set(None) 
             ui.update_checkbox("blk_confirm_check", value=False)
             
