@@ -485,7 +485,10 @@ def admin_server(input, output, session, client, selected_project, display_tz):
         return ui.div(
             ui.h5("⚠️ Data Pending Archival", class_="text-warning mt-3"),
             ui.output_data_frame("archive_pending_table"),
-            ui.input_checkbox("confirm_archive_check", "I authorize flattening this data into the archive and permanently purging it from active tables.", class_="mt-3"),
+            ui.div(
+                ui.input_checkbox("confirm_archive_check", "I authorize flattening this data into the archive and permanently purging it from active tables."),
+                class_="mt-3"
+            ),
             ui.output_ui("archive_execute_btn_ui")
         )
 
