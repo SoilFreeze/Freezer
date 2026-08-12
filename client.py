@@ -21,8 +21,8 @@ MAX_CHARTS = 25
 # ===============================================================
 app_sidebar = ui.sidebar(
     ui.h4("Configuration"),
-    ui.input_text("job_number", "Job Number:", placeholder="e.g., 2527"),
-    ui.p("Enter your assigned Job Number to view project telemetry.", style="font-size: 0.9em; color: gray;")
+    ui.input_text("job_number", "Job Number:", placeholder="e.g., 2527"),  # <-- Comma required here
+    ui.p("Enter your assigned Job Number to view project telemetry.", style="font-size: 0.9em; color: gray;"), # <-- Comma required here
     id="client_sidebar"
 )
 
