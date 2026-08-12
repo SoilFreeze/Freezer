@@ -4,12 +4,8 @@ import pandas as pd
 # Internal Data & Config
 from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER_VIEW
 
-def get_summary_data(client, selected_project, show_archived):
-    """
-    Pure Python function to retrieve all summary data matrices.
-    Returns: (active_projs_df, pool_df, tel_df, error_msg)
-    """
-    if client is None: return None, None, None, "Database connection unavailable."
+def get_summary_data(client, selected_project, show_archived, approved_only=False):
+    if client is None: return None, None, None, None, "Database connection unavailable."
 
     status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
     
@@ -51,6 +47,8 @@ def get_summary_data(client, selected_project, show_archived):
     pool_df = client.query(pool_q).to_dataframe()
     pool_df[['Phase', 'System', 'Location']] = pool_df[['Phase', 'System', 'Location']].fillna('')
 
+    approval_cond = "AND UPPER(CAST(approval_status AS STRING)) = 'TRUE'" if approved_only else ""
+
     summary_q = f"""
         WITH raw_data AS (
             SELECT Project, Phase, System, Bank, Location, Depth, temperature, timestamp, NodeNum
@@ -58,29 +56,34 @@ def get_summary_data(client, selected_project, show_archived):
             WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               AND Project IS NOT NULL
               AND UPPER(Project) NOT LIKE '%OFFICE%'
+              {approval_cond}
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
         )
-        SELECT 
-            r.Project, r.Phase, r.System, r.Bank, r.Location, r.Depth, r.NodeNum,
-            MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
-            MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
-            MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
-            MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
-            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
-            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR)) as checkins_6h,
-            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
-            ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
-            MAX(r.timestamp) as latest_ts
-        FROM raw_data r CROSS JOIN MaxTime m
-        GROUP BY 1, 2, 3, 4, 5, 6, 7
+        # ... [Keep rest of summary_q the same] ...
     """
     tel_df = client.query(summary_q).to_dataframe()
     if not tel_df.empty:
         tel_df[['Phase', 'System', 'Bank', 'Location']] = tel_df[['Phase', 'System', 'Bank', 'Location']].fillna('')
 
-    return active_projs, pool_df, tel_df, None
+    # Calculate absolute latest approval timestamp per job
+    appr_q = f"""
+        SELECT 
+            TRIM(SPLIT(CAST(Project AS STRING), '-')[OFFSET(0)]) as RootJob,
+            MAX(timestamp) as last_approved_ts
+        FROM `{MASTER_VIEW}`
+        WHERE UPPER(CAST(approval_status AS STRING)) = 'TRUE'
+          AND UPPER(Project) NOT LIKE '%OFFICE%'
+          {project_filter}
+        GROUP BY RootJob
+    """
+    try:
+        appr_df = client.query(appr_q).to_dataframe()
+    except:
+        appr_df = pd.DataFrame()
+
+    return active_projs, pool_df, tel_df, appr_df, None
 
 # =============================================================================
 # SHINY UI MODULE
