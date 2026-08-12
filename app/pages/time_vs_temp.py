@@ -30,6 +30,9 @@ def get_image_base64(img_path):
 def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
     return ui.div(
+        # FIX: Invisible widget forces Shiny to load Plotly JS bindings on page load
+        ui.div(output_widget("js_dependency_loader"), style="display: none;"),
+        
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
@@ -46,7 +49,6 @@ def time_vs_temp_ui():
             )
         )
     )
-
 # =============================================================================
 # SHINY SERVER MODULE
 # =============================================================================
@@ -173,6 +175,10 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
         proj = selected_project() if callable(selected_project) else selected_project
         
+        # Resolve visual toggles
+        show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
+        show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
+        
         end_date = pd.Timestamp.now()
         start_date = end_date - pd.Timedelta(days=days)
 
@@ -188,10 +194,13 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             client=client, df=loc_data, title=f"Thermal Trends: {target_loc}",
             start_view=start_date, end_view=end_date, active_refs=refs,
             unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
-            f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt
+            f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
+            # FIX: Explicitly pass Shiny states to override the Streamlit-centric get_ui_state fallbacks
+            opt_show_masked=show_m, 
+            opt_show_baddata=show_b,
+            opt_project_name=proj
         )
         return fig
-
     @output(id="main_map_chart")
     @render_plotly
     def _map():
