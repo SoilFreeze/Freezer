@@ -129,7 +129,7 @@ def summary_server(input, output, session, client, selected_project, global_show
         show_amb = global_show_ambient() if callable(global_show_ambient) else global_show_ambient
 
         # --- THE FIX: Force "All Projects" to bypass the sidebar dropdown entirely ---
-        active_projs, pool_df, tel_df, err = get_summary_data(client, "All Projects", show_arch)
+        active_projs, pool_df, tel_df, appr_df, err = get_summary_data(client, "All Projects", show_arch, approved_only=False)
 
         if err:
             return ui.p(err, class_="text-danger")
