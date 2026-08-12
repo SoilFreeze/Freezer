@@ -368,7 +368,7 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
                         name="Ambient Air (Site Avg)", mode='lines',
                         connectgaps=False,
                         line=dict(width=2.5, dash='dot', color='orange'),
-                        hovertemplate="<b>Site Ambient Avg</b><br>Time: %{x|%H:%M}<br>Temp: %{y:.1f}" + unit_label + "<extra></extra>",
+                        hovertemplate=f"<b>Site Ambient Avg</b><br>Time: %{{x|%H:%M}} {friendly_tz}<br>Temp: %{{y:.1f}}" + unit_label + "<extra></extra>",
                         legendrank=99 
                     ))
             except Exception:
@@ -423,7 +423,8 @@ def build_high_speed_graph(client, df, title, start_view, end_view, active_refs,
         yaxis=dict(title=f"Temperature ({unit_label})", range=y_range, dtick=10, showgrid=True, gridcolor='Gainsboro', showline=True, mirror=True, linecolor='black', linewidth=2, minor=dict(dtick=2, showgrid=True, gridcolor='#f8f8f8')),
         legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
     )
-    fig.update_xaxes(hoverformat="%b %d, %Y %I:%M %p")        
+    friendly_tz = display_tz.replace("US/", "") if "US/" in display_tz else display_tz
+    fig.update_xaxes(hoverformat=f"%b %d, %Y %I:%M %p ({friendly_tz})") 
 
     # ---------------------------------------------------------
     # GROUND ELEVATION LEGEND NOTE
