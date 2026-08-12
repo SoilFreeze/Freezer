@@ -10,6 +10,8 @@ from app.data.processor import get_universal_portal_data, get_bq_client
 from app.components.charts import build_high_speed_graph
 from app.components.charts import build_cropped_site_map
 
+from app.utils.config import PROJECT_REGISTRY_TABLE
+
 # Define a generous maximum number of charts to support per project
 MAX_CHARTS = 25
 
@@ -50,7 +52,31 @@ def server(input, output, session):
     def current_job():
         # Only return the value if the text box has been populated
         return input.job_number().strip() if input.job_number() else ""
-
+    
+    @reactive.Calc
+    def project_timezone():
+        job = current_job()
+        if not job: 
+            return "US/Pacific"
+            
+        client = get_bq_client()
+        if client is None: 
+            return "US/Pacific"
+            
+        try:
+            # Query the registry to find the specific timezone for this project
+            q = f"SELECT Timezone FROM `{PROJECT_REGISTRY_TABLE}` WHERE CAST(Project AS STRING) LIKE '{job}%' LIMIT 1"
+            df = client.query(q).to_dataframe()
+            if not df.empty and pd.notna(df['Timezone'].iloc[0]):
+                tz = str(df['Timezone'].iloc[0]).strip()
+                if tz: 
+                    return tz
+        except Exception:
+            pass
+            
+        return "US/Pacific" # Safe fallback
+        
+    # --- GLOBAL HEADER ---
     @output
     @render.ui
     def dynamic_global_header():
@@ -62,6 +88,9 @@ def server(input, output, session):
         
         # Unpack 5 values and pass approved_only=True
         active_projs, _, tel_df, appr_df, err = get_summary_data(client, selected_project=job, show_archived=False, approved_only=True)
+        
+        # Fetch dynamic timezone
+        proj_tz = project_timezone()
         
         if err or active_projs is None or active_projs.empty:
             return ui.h1(f"📊 Project: {job}")
@@ -96,7 +125,8 @@ def server(input, output, session):
         if pd.notnull(last_appr_ts):
             if last_appr_ts.tzinfo is None:
                 last_appr_ts = last_appr_ts.tz_localize('UTC')
-            latest_str = last_appr_ts.tz_convert('US/Pacific').strftime('%B %d, %Y at %I:%M %p')
+            # Apply dynamic timezone here
+            latest_str = last_appr_ts.tz_convert(proj_tz).strftime('%B %d, %Y at %I:%M %p')
         
         return ui.HTML(f"""
             <h1 style="display: flex; align-items: center; gap: 10px; color: #343a40; font-weight: 700; font-size: 2.8rem; margin-bottom: 25px;">
@@ -220,8 +250,7 @@ def server(input, output, session):
         return ui.TagList(*ui_elements)
 
     # Factory Generator to bind charts to their respective native outputs dynamically
-    for i in range(MAX_CHARTS):
-        def make_timeline_chart(index):
+    def make_timeline_chart(index):
             @output(id=f"timeline_chart_{index}")
             @render_plotly
             def _plot():
@@ -231,11 +260,14 @@ def server(input, output, session):
                     loc_data = df[df['Location'] == loc]
                     client = get_bq_client()
                     
+                    # Fetch dynamic timezone
+                    proj_tz = project_timezone()
+                    
                     fig = build_high_speed_graph(
                         client=client, df=loc_data, title=f"Thermal Trends: {loc}",
                         start_view=df['timestamp'].min(), end_view=df['timestamp'].max(), 
                         active_refs=[(32.0, "Freezing")], unit_mode="Fahrenheit", unit_label="°F", 
-                        display_tz="US/Pacific", curve_id=f"{current_job()}-{loc}", show_elevation=False
+                        display_tz=proj_tz, curve_id=f"{current_job()}-{loc}", show_elevation=False
                     )
                     return fig
                 return None
@@ -266,8 +298,11 @@ def server(input, output, session):
         job = current_job()
         if not job: return {}, ""
         
+        # Fetch dynamic timezone
+        proj_tz = project_timezone()
+        
         figures_dict, chart_label, error_msg = generate_depth_figures(
-            selected_project=job, unit_label="°F", display_tz="US/Pacific", 
+            selected_project=job, unit_label="°F", display_tz=proj_tz, 
             orientation="vertical", lookback_weeks=5, show_masked=False, 
             show_baddata=False, unit_mode="Fahrenheit"
         )
