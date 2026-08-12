@@ -23,6 +23,7 @@ app_sidebar = ui.sidebar(
     ui.h4("Configuration"),
     ui.input_text("job_number", "Job Number:", placeholder="e.g., 2527"),
     ui.p("Enter your assigned Job Number to view project telemetry.", style="font-size: 0.9em; color: gray;")
+    id="client_sidebar"
 )
 
 app_ui = ui.page_sidebar(
@@ -62,6 +63,9 @@ def server(input, output, session):
             if "job" in parsed_params:
                 target_job = parsed_params["job"][0]
                 ui.update_text("job_number", value=target_job)
+                
+                # <--- ADD THIS LINE: Collapse the sidebar automatically
+                ui.update_sidebar("client_sidebar", show=False)
 
     # --- Safely grab the input ---
     @reactive.Calc
