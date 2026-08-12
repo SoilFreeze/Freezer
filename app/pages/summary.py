@@ -71,6 +71,11 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
     pool_df[['Phase', 'System', 'Location']] = pool_df[['Phase', 'System', 'Location']].fillna('')
 
     # --- 3. TELEMETRY: Last 48 hours of data ---
+    # NEW: Strict Approval Filter for the Client Portal
+    approval_sql = ""
+    if is_client_portal:
+        approval_sql = "AND UPPER(TRIM(CAST(approval_status AS STRING))) IN ('TRUE', 'YES', '1')"
+
     summary_q = f"""
         WITH raw_data AS (
             SELECT Project, Phase, System, Bank, Location, Depth, temperature, timestamp, NodeNum
@@ -78,6 +83,7 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
             WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
               AND Project IS NOT NULL
               AND UPPER(Project) NOT LIKE '%OFFICE%'
+              {approval_sql}
         ),
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
