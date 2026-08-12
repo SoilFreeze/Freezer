@@ -119,21 +119,67 @@ def server(input, output, session):
             return ui.p("Please provide a job number to view the summary.", style="color: gray; font-style: italic;")
             
         client = get_bq_client()
-        # Unpack 5 values and pass approved_only=True
+        
+        # FIX: Unpack 5 values here to match the updated get_summary_data signature
         _, _, tel_df, _, err = get_summary_data(client, selected_project=job, show_archived=False, approved_only=True)
         
-        # ... [Rest of the summary card rendering remains the same] ...
+        if err: return ui.div(f"Error loading summary: {err}", style="color: red;")
+        if tel_df is None or tel_df.empty: return ui.div(f"No recent telemetry found for job: {job} in the last 48 hours.", style="color: orange;")
+            
+        is_amb_col = tel_df['Location'].astype(str).str.upper() == 'AMBIENT'
+        is_tp_col = tel_df['Depth'].notnull() & (tel_df['Depth'].astype(str).str.strip() != '') & ~is_amb_col
+        is_s_col = (tel_df['Bank'].astype(str).str.startswith('S') | tel_df['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
+        is_r_col = (tel_df['Bank'].astype(str).str.startswith('R') | tel_df['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
+        
+        groups = [
+            ("Supply (S)", tel_df[is_s_col]), 
+            ("Return (R)", tel_df[is_r_col]), 
+            ("Temp Pipes (TP)", tel_df[is_tp_col]),
+            ("Ambient", tel_df[is_amb_col])
+        ]
+        
+        cols = []
+        for title, g_df in groups:
+            if g_df.empty or g_df['latest_temp'].isnull().all():
+                cols.append(ui.HTML(f"""
+                    <div style="font-family: sans-serif;">
+                        <h3 style="margin-bottom: 15px; color: #343a40; font-weight: 500;">{title}</h3>
+                        <p style="color: #868e96; font-size: 0.95em;">No data available.</p>
+                    </div>
+                """))
+                continue
+                
+            latest_val = g_df['latest_temp'].mean()
+            high_24 = g_df['max_24h'].max()
+            low_24 = g_df['min_24h'].min()
+            
+            l_str = f"{latest_val:.1f}°F" if pd.notnull(latest_val) else "N/A"
+            h_str = f"{high_24:.1f}°F" if pd.notnull(high_24) else "N/A"
+            lo_str = f"{low_24:.1f}°F" if pd.notnull(low_24) else "N/A"
+            
+            cols.append(ui.HTML(f"""
+            <div style="font-family: sans-serif;">
+                <h3 style="margin-bottom: 20px; color: #343a40; font-weight: 500;">{title}</h3>
+                <div style="color: #6c757d; font-size: 0.9rem; margin-bottom: 8px;">Avg (Latest)</div>
+                <div style="font-size: 3rem; font-weight: 300; margin-bottom: 30px; color: #212529; line-height: 1;">{l_str}</div>
+                <div style="font-size: 0.85rem; color: #868e96; display: flex; gap: 15px;">
+                    <span><b>High (24h):</b> {h_str}</span>
+                    <span><b>Low (24h):</b> {lo_str}</span>
+                </div>
+            </div>
+            """))
+            
+        return ui.layout_column_wrap(*cols, width=1/4, gap="30px")
 
     # --- TAB 2: NATIVE TIMELINE CHARTS ---
+    # Fetch database payload exactly once to feed all charts
     @reactive.Calc
     def shared_timeline_data():
         job = current_job()
         if not job: return None, None, []
         
-        # Lock down the timeline charts to strictly approved data 
+        # FIX: Added approved_only=True to lock down the graphs
         df = get_universal_portal_data(job, lookback_days=42, is_summary_page=False, show_masked=False, show_baddata=False, approved_only=True)
-        
-        # ... [Rest of timeline fetch block remains the same] ...
         client = get_bq_client()
         
         df_all_locs = pd.DataFrame()
