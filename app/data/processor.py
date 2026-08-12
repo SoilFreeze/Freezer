@@ -83,13 +83,12 @@ def get_bq_client():
         return None
         
 @safe_cache(ttl=600)
-def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=False, show_masked=False, show_baddata=False):
+def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=False, show_masked=False, show_baddata=False, approved_only=False):
     client = get_bq_client()
     if client is None: return pd.DataFrame()
     
     root_job_id = str(project_id).split('-')[0].strip()
 
-    # Build dynamic phase matching for the SQL query
     phase_sql = ""
     if not is_summary_page:
         phase_match = re.search(r'(?i)Phase\s*(\d+)', str(project_id))
@@ -97,28 +96,29 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
             target_phase = phase_match.group(1)
             phase_sql = f"AND TRIM(CAST(Phase AS STRING)) = '{target_phase}'"
 
-    # 1. Safely map exclusions without triggering syntax errors
-    exclusions = ["'FALSE'"] 
-    if not show_masked:
-        exclusions.append("'MASKED'")
-    if not show_baddata:
-        exclusions.append("'BADDATA'")
-    
-    exclusion_str = ", ".join(exclusions)
+    # --- UPDATED: Strict Approval Enforcement ---
+    if approved_only:
+        approval_filter_sql = "AND UPPER(CAST(m.approval_status AS STRING)) = 'TRUE'"
+    else:
+        exclusions = ["'FALSE'"] 
+        if not show_masked:
+            exclusions.append("'MASKED'")
+        if not show_baddata:
+            exclusions.append("'BADDATA'")
+        
+        exclusion_str = ", ".join(exclusions)
+        approval_filter_sql = f"AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})"
 
-    # 2. Lift the temperature bounds cleanly if hunting anomalies
     if show_baddata:
         temp_bounds_sql = "(1=1)" 
     else:
         temp_bounds_sql = "(m.temperature >= -30.0 AND m.temperature <= 120.0)"
 
-    # 3. Smart Office Filter (Make sure this 'if' is pulled all the way to the left!)
     if 'OFFICE' in str(root_job_id).upper():
         office_filter_sql = ""
     else:
         office_filter_sql = "AND UPPER(CAST(m.Project AS STRING)) NOT LIKE '%OFFICE%' AND UPPER(CAST(m.Location AS STRING)) NOT LIKE '%OFFICE%'"
 
-    # 4. Push the timeline filter directly into BigQuery
     time_filter_sql = f"AND m.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)"
 
     query = f"""
@@ -168,7 +168,6 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
         FROM `{config.MASTER_VIEW}` m
         INNER JOIN ProjectAssignments v 
           ON UPPER(TRIM(CAST(m.NodeNum AS STRING))) = UPPER(TRIM(CAST(v.NodeNum AS STRING)))
-          
           AND m.timestamp >= v.active_start
           AND m.timestamp <= v.active_end
           
@@ -176,7 +175,7 @@ def get_universal_portal_data(project_id, lookback_days=35, is_summary_page=Fals
           AND m.Project LIKE CONCAT(@root_job_id, '%')
           {office_filter_sql}
           {time_filter_sql}
-          AND UPPER(COALESCE(CAST(m.approval_status AS STRING), 'TRUE')) NOT IN ({exclusion_str})
+          {approval_filter_sql}
         ORDER BY m.timestamp ASC
     """
     
