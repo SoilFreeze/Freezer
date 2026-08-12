@@ -129,6 +129,7 @@ def summary_server(input, output, session, client, selected_project, global_show
         show_amb = global_show_ambient() if callable(global_show_ambient) else global_show_ambient
 
         # --- THE FIX: Force "All Projects" to bypass the sidebar dropdown entirely ---
+        # Unpack 5 values including the newly returned appr_df dataframe
         active_projs, pool_df, tel_df, appr_df, err = get_summary_data(client, "All Projects", show_arch, approved_only=False)
 
         if err:
@@ -265,7 +266,21 @@ def summary_server(input, output, session, client, selected_project, global_show
                     data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                 
                 status_color = "🟢" if active_24h >= total_assigned and total_assigned > 0 else "🔴" if active_24h == 0 else "🟠"
-                status_html = f"{status_color} <b>Hardware Status:</b> <code>{active_1h}</code> (1h) | <code>{active_6h}</code> (6h) | <code>{active_24h}</code> (24h) | Assigned Pool: <code>{total_assigned}</code><br>{data_age_str}"
+                
+                # Render the Official Data Approved Strip
+                last_appr_ts = pd.NaT
+                if not appr_df.empty:
+                    job_match = appr_df[appr_df['RootJob'] == job_num]
+                    if not job_match.empty:
+                        last_appr_ts = job_match['last_approved_ts'].max()
+                
+                if pd.notnull(last_appr_ts):
+                    appr_str = last_appr_ts.tz_convert(tz).strftime('%b %d, %Y %I:%M %p')
+                    appr_html = f"<div style='margin-top: 8px;'><span style='background-color: #d1ecf1; color: #0c5460; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; border: 1px solid #bee5eb;'>✅ <b>Official Data Approved Through:</b> {appr_str}</span></div>"
+                else:
+                    appr_html = f"<div style='margin-top: 8px;'><span style='background-color: #f8d7da; color: #721c24; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; border: 1px solid #f5c6cb;'>⚠️ <b>No Approved Data Available</b></span></div>"
+
+                status_html = f"{status_color} <b>Hardware Status:</b> <code>{active_1h}</code> (1h) | <code>{active_6h}</code> (6h) | <code>{active_24h}</code> (24h) | Assigned Pool: <code>{total_assigned}</code><br>{data_age_str}{appr_html}"
 
                 # Metric Columns
                 metric_columns = []
