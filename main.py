@@ -38,7 +38,6 @@ app_ui = ui.page_fluid(
                     "Admin Tools"
                 ]
             ),
-            ui.hr(),
             ui.output_ui("project_selector_ui"),
             ui.output_ui("data_pulse_ui"),
             ui.input_action_button("refresh_btn", "🔄 Refresh Data", class_="btn-primary w-100"),
