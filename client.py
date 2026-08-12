@@ -149,57 +149,105 @@ def server(input, output, session):
             return ui.p("Please provide a job number to view the summary.", style="color: gray; font-style: italic;")
             
         client = get_bq_client()
-        
-        # FIX: Unpack 5 values here to match the updated get_summary_data signature
-        _, _, tel_df, _, err = get_summary_data(client, selected_project=job, show_archived=False, approved_only=True)
+        active_projs, pool_df, tel_df, appr_df, err = get_summary_data(client, selected_project=job, show_archived=False, approved_only=True)
         
         if err: return ui.div(f"Error loading summary: {err}", style="color: red;")
-        if tel_df is None or tel_df.empty: return ui.div(f"No recent telemetry found for job: {job} in the last 48 hours.", style="color: orange;")
-            
-        is_amb_col = tel_df['Location'].astype(str).str.upper() == 'AMBIENT'
-        is_tp_col = tel_df['Depth'].notnull() & (tel_df['Depth'].astype(str).str.strip() != '') & ~is_amb_col
-        is_s_col = (tel_df['Bank'].astype(str).str.startswith('S') | tel_df['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
-        is_r_col = (tel_df['Bank'].astype(str).str.startswith('R') | tel_df['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
-        
-        groups = [
-            ("Supply (S)", tel_df[is_s_col]), 
-            ("Return (R)", tel_df[is_r_col]), 
-            ("Temp Pipes (TP)", tel_df[is_tp_col]),
-            ("Ambient", tel_df[is_amb_col])
-        ]
-        
-        cols = []
-        for title, g_df in groups:
+        if active_projs is None or active_projs.empty: return ui.p("No active projects found matching the criteria.", class_="text-muted")
+
+        # Helper function identical to main app, locked to Fahrenheit for the client portal
+        def build_metric_card(title, g_df, target_temp):
             if g_df.empty or g_df['latest_temp'].isnull().all():
-                cols.append(ui.HTML(f"""
-                    <div style="font-family: sans-serif;">
-                        <h3 style="margin-bottom: 15px; color: #343a40; font-weight: 500;">{title}</h3>
-                        <p style="color: #868e96; font-size: 0.95em;">No data available.</p>
-                    </div>
-                """))
-                continue
-                
+                return ui.card(ui.h6(title), ui.p("No recent data", class_="text-muted"), style="background-color: #f8f9fa;")
+
             latest_val = g_df['latest_temp'].mean()
-            high_24 = g_df['max_24h'].max()
-            low_24 = g_df['min_24h'].min()
+            c_min, c_max = g_df['min_now'].min(), g_df['max_now'].max()
+            m24, x24 = g_df['min_24h'].min(), g_df['max_24h'].max()
             
-            l_str = f"{latest_val:.1f}°F" if pd.notnull(latest_val) else "N/A"
-            h_str = f"{high_24:.1f}°F" if pd.notnull(high_24) else "N/A"
-            lo_str = f"{low_24:.1f}°F" if pd.notnull(low_24) else "N/A"
-            
-            cols.append(ui.HTML(f"""
-            <div style="font-family: sans-serif;">
-                <h3 style="margin-bottom: 20px; color: #343a40; font-weight: 500;">{title}</h3>
-                <div style="color: #6c757d; font-size: 0.9rem; margin-bottom: 8px;">Avg (Latest)</div>
-                <div style="font-size: 3rem; font-weight: 300; margin-bottom: 30px; color: #212529; line-height: 1;">{l_str}</div>
-                <div style="font-size: 0.85rem; color: #868e96; display: flex; gap: 15px;">
-                    <span><b>High (24h):</b> {h_str}</span>
-                    <span><b>Low (24h):</b> {lo_str}</span>
-                </div>
-            </div>
-            """))
-            
-        return ui.layout_column_wrap(*cols, width=1/4, gap="30px")
+            u_lbl = "°F"
+
+            pct_html = ""
+            if target_temp is not None:
+                total_valid_nodes = g_df['NodeNum'].nunique()
+                if total_valid_nodes > 0:
+                    nodes_meeting = g_df[g_df['latest_temp'] <= target_temp]['NodeNum'].nunique()
+                    pct = (nodes_meeting / total_valid_nodes) * 100
+                    color = "green" if pct == 100 else "#FF8C00" if pct > 0 else "gray"
+                    pct_html = f"<span style='color:{color}; font-size:0.85rem; font-weight:bold;'>{pct:.0f}%</span> <span style='font-size:0.85rem; color:{color};'>Nodes ≤ {target_temp:.1f}{u_lbl}</span>"
+
+            curr_str = f"{c_min:.1f} to {c_max:.1f}{u_lbl}" if pd.notnull(c_min) else "No Data"
+            hist_str = f"{m24:.1f} to {x24:.1f}{u_lbl}" if pd.notnull(m24) else "No Data"
+
+            return ui.card(
+                ui.h6(title, style="margin-bottom: 0px;"),
+                ui.h2(f"{latest_val:.1f}{u_lbl}", style="margin-top: 5px; margin-bottom: 0px; color: #1f77b4;"),
+                ui.HTML(pct_html) if pct_html else ui.HTML("<div style='height: 18px;'></div>"),
+                ui.hr(style="margin-top: 10px; margin-bottom: 10px;"),
+                ui.HTML(f"<div style='font-size: 0.8rem; line-height: 1.3; color: #555;'><b>Current Range:</b> {curr_str}<br><b>24h Range:</b> {hist_str}</div>"),
+                style="border-top: 4px solid #1f77b4;"
+            )
+
+        cards = []
+        for _, row in active_projs.iterrows():
+            p_project = str(row['Project']).strip()
+            p_name = row['ProjectName'] if pd.notnull(row['ProjectName']) else p_project
+            job_num = p_project.split('-')[0].strip()
+
+            target_phase = "1" if "Phase 1" in p_project or "Phase1" in p_project else "2" if "Phase 2" in p_project or "Phase2" in p_project else "3" if "Phase 3" in p_project or "Phase3" in p_project else ""
+
+            pool_matches = pool_df[(pool_df['Project'].str.startswith(job_num)) & ((pool_df['Phase'] == target_phase) | (target_phase == ""))]
+            systems = sorted(list(set([str(s).strip() for s in pool_matches['System'].unique() if str(s).strip()])))
+            if not systems: systems = [""] 
+
+            tel_matches = pd.DataFrame(columns=tel_df.columns) if tel_df.empty else tel_df[(tel_df['Project'].str.startswith(job_num)) & ((tel_df['Phase'] == target_phase) | (target_phase == ""))]
+
+            # Check if this job only has one system and phase combination
+            all_job_pool = pool_df[pool_df['Project'].str.startswith(job_num)]
+            unique_combos = all_job_pool[['Phase', 'System']].drop_duplicates()
+            is_single_system = len(unique_combos) <= 1
+
+            for sys in systems:
+                block_pool = pool_matches if sys == "" else pool_matches[(pool_matches['System'] == sys) | (pool_matches['Location'] == 'AMBIENT')]
+                total_assigned = block_pool['total_assigned'].sum() if not block_pool.empty else 0
+                
+                sys_tel = tel_matches if sys == "" or tel_matches.empty else tel_matches[(tel_matches['System'] == sys) | (tel_matches['Location'].astype(str).str.upper() == 'AMBIENT')]
+
+                if total_assigned == 0 and sys_tel.empty:
+                    continue 
+
+                # Apply suffix conditionally
+                title_suffix = ""
+                if not is_single_system:
+                    title_ext = []
+                    if target_phase: title_ext.append(f"Phase {target_phase}")
+                    if sys: title_ext.append(f"System {sys}")
+                    title_suffix = f" ({', '.join(title_ext)})" if title_ext else ""
+
+                metric_columns = []
+                if not sys_tel.empty:
+                    is_amb_col = sys_tel['Location'].astype(str).str.upper() == 'AMBIENT'
+                    is_tp_col = sys_tel['Depth'].notnull() & (sys_tel['Depth'].astype(str).str.strip() != '') & ~is_amb_col
+                    is_s_col = (sys_tel['Bank'].astype(str).str.startswith('S') | sys_tel['Location'].astype(str).str.startswith('S')) & ~is_amb_col & ~is_tp_col
+                    is_r_col = (sys_tel['Bank'].astype(str).str.startswith('R') | sys_tel['Location'].astype(str).str.startswith('R')) & ~is_amb_col & ~is_tp_col
+
+                    groups_data = [
+                        ("📥 Supply", sys_tel[is_s_col], -10), 
+                        ("📤 Return", sys_tel[is_r_col], 0), 
+                        ("📏 TempPipes", sys_tel[is_tp_col], 32),
+                        ("☁️ Ambient", sys_tel[is_amb_col], None)
+                    ]
+
+                    for title, g_df, tgt in groups_data:
+                        metric_columns.append(build_metric_card(title, g_df, tgt))
+
+                cards.append(
+                    ui.card(
+                        ui.h4(f"🏗️ {p_name}{title_suffix}"),
+                        ui.layout_columns(*metric_columns) if metric_columns else ui.p(f"No recent telemetry received for {p_project}{title_suffix}.", class_="text-muted"),
+                        style="margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                    )
+                )
+
+        return ui.div(*cards)
 
     # --- TAB 2: NATIVE TIMELINE CHARTS ---
     # Fetch database payload exactly once to feed all charts
