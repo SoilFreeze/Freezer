@@ -125,8 +125,8 @@ def server(input, output, session):
         if pd.notnull(last_appr_ts):
             if last_appr_ts.tzinfo is None:
                 last_appr_ts = last_appr_ts.tz_localize('UTC')
-            # Apply dynamic timezone here
-            latest_str = last_appr_ts.tz_convert(proj_tz).strftime('%B %d, %Y at %I:%M %p')
+            # Apply dynamic timezone and append %Z for the abbreviation (e.g., PDT/EST)
+            latest_str = last_appr_ts.tz_convert(proj_tz).strftime('%B %d, %Y at %I:%M %p %Z')
         
         return ui.HTML(f"""
             <h1 style="display: flex; align-items: center; gap: 10px; color: #343a40; font-weight: 700; font-size: 2.8rem; margin-bottom: 25px;">
@@ -139,6 +139,7 @@ def server(input, output, session):
             {freeze_html}
             <hr style="margin-top: 15px; margin-bottom: 25px; border-top: 1px solid #dee2e6;">
         """)
+            
 
     # --- TAB 1: SUMMARY ENGINE ---
     @output
