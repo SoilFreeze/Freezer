@@ -7,7 +7,7 @@ from app.data.processor import get_universal_portal_data, get_bq_client
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
 from app.pages.summary import render_summary_dashboard
 from app.pages.depth import render_depth_charts
-from app.utils.config import PROJECT_ID, DATASET_ID
+from app.utils.config import PROJECT_ID, DATASET_ID, PROJECT_REGISTRY_TABLE # Added PROJECT_REGISTRY_TABLE
 
 # ===============================================================
 # 1. AUTHENTICATION & UI LOCKDOWN
@@ -60,7 +60,21 @@ unit_label = "°F"
 st.session_state["unit_mode"] = unit_mode
 st.session_state["unit_label"] = unit_label
 
-display_tz = "US/Pacific" 
+# --- DYNAMIC TIMEZONE FIX ---
+display_tz = "US/Pacific" # Fallback
+temp_client = get_bq_client()
+if temp_client and TARGET_JOB_NUMBER:
+    try:
+        job_root = str(TARGET_JOB_NUMBER).split('-')[0].strip()
+        tz_q = f"SELECT Timezone FROM `{PROJECT_REGISTRY_TABLE}` WHERE CAST(Project AS STRING) LIKE '{job_root}%' LIMIT 1"
+        tz_df = temp_client.query(tz_q).to_dataframe()
+        if not tz_df.empty and pd.notnull(tz_df['Timezone'].iloc[0]):
+            fetched_tz = str(tz_df['Timezone'].iloc[0]).strip()
+            if fetched_tz: 
+                display_tz = fetched_tz
+    except Exception:
+        pass
+        
 st.session_state["display_tz"] = display_tz
 active_refs = [(32.0, "Freezing")]
 st.session_state["active_refs"] = active_refs
@@ -201,7 +215,8 @@ def main():
     ])
     
     with tabs[0]:
-        render_summary_dashboard(TARGET_JOB_NUMBER, unit_label, unit_mode, display_tz)
+        # --- NEW: Flagged as Client Portal ---
+        render_summary_dashboard(TARGET_JOB_NUMBER, unit_label, unit_mode, display_tz, is_client_portal=True)
         
     with tabs[1]:
         render_interactive_timeline(master_df, job_num_root, client)
