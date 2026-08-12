@@ -2,6 +2,7 @@ from shiny import App, render, reactive, ui
 from shinywidgets import output_widget, render_plotly
 import pandas as pd
 import os
+import urllib.parse # <-- Add this import
 
 # Import your decoupled backend logic
 from app.pages.summary import get_summary_data
@@ -47,10 +48,24 @@ app_ui = ui.page_sidebar(
 # ===============================================================
 def server(input, output, session):
     
-    # --- FIX 1: Safely grab the input without crashing the server ---
+    # --- NEW: Auto-Load Job Number from URL ---
+    @reactive.Effect
+    def parse_url_parameters():
+        # Read the query string from the browser (e.g., "?job=2527")
+        search_string = session.input[".clientdata_url_search"]()
+        
+        if search_string:
+            # Parse the string into a dictionary
+            parsed_params = urllib.parse.parse_qs(search_string.lstrip("?"))
+            
+            # If 'job' is in the URL, update the sidebar input box automatically
+            if "job" in parsed_params:
+                target_job = parsed_params["job"][0]
+                ui.update_text("job_number", value=target_job)
+
+    # --- Safely grab the input ---
     @reactive.Calc
     def current_job():
-        # Only return the value if the text box has been populated
         return input.job_number().strip() if input.job_number() else ""
     
     @reactive.Calc
