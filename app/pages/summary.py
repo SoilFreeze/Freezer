@@ -250,7 +250,8 @@ def render_summary_dashboard(selected_project, unit_label, unit_mode, display_tz
                         except Exception:
                             local_ts = latest_ts_utc
                             
-                        ts_display = local_ts.strftime('%b %d, %Y %I:%M %p')
+                        # Added %Z to output the Timezone Abbreviation (e.g., PDT/EST)
+                        ts_display = local_ts.strftime('%b %d, %Y %I:%M %p %Z')
                         
                         now_utc = pd.Timestamp.now(tz='UTC')
                         elapsed_mins = int((now_utc - latest_ts_utc).total_seconds() / 60)
