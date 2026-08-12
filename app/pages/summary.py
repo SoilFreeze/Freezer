@@ -277,9 +277,19 @@ def summary_server(input, output, session, client, selected_project, global_show
                     latest_ts = sys_tel['latest_ts'].max()
                     
                     if pd.notnull(latest_ts):
-                        elapsed_mins = int((pd.Timestamp.now(tz='UTC') - latest_ts).total_seconds() / 60)
+                        # Ensure latest_ts is timezone-aware (UTC) before converting
+                        if latest_ts.tzinfo is None:
+                            latest_ts_utc = latest_ts.tz_localize('UTC')
+                        else:
+                            latest_ts_utc = latest_ts
+
+                        # Convert to selected local timezone
+                        latest_ts_local = latest_ts_utc.tz_convert(tz)
+                        elapsed_mins = int((pd.Timestamp.now(tz='UTC') - latest_ts_utc).total_seconds() / 60)
                         pulse = f"🟢 **Live** ({elapsed_mins}m ago)" if elapsed_mins <= 60 else f"🟠 **Delayed** ({elapsed_mins}m ago)" if elapsed_mins <= 180 else f"🔴 **Stale** ({elapsed_mins // 60}h ago)"
-                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts.strftime('%b %d, %H:%M UTC')})*"
+                        
+                        # Apply %Z format to local timestamp
+                        data_age_str = f"⏱️ **Data Pulse:** {pulse} — *(Last sync: {latest_ts_local.strftime('%b %d, %H:%M %Z')})*"
                     else:
                         data_age_str = "⏱️ **Data Pulse:** 🔴 **No Data (Last 48h)**"
                 else:
@@ -296,7 +306,11 @@ def summary_server(input, output, session, client, selected_project, global_show
                         last_appr_ts = job_match['last_approved_ts'].max()
                 
                 if pd.notnull(last_appr_ts):
-                    appr_str = last_appr_ts.tz_convert(tz).strftime('%b %d, %Y %I:%M %p')
+                    if last_appr_ts.tzinfo is None:
+                        last_appr_ts = last_appr_ts.tz_localize('UTC')
+                    
+                    # Apply %Z format to approval timestamp
+                    appr_str = last_appr_ts.tz_convert(tz).strftime('%b %d, %Y %I:%M %p %Z')
                     appr_html = f"<div style='margin-top: 8px;'><span style='background-color: #d1ecf1; color: #0c5460; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; border: 1px solid #bee5eb;'>✅ <b>Official Data Approved Through:</b> {appr_str}</span></div>"
                 else:
                     appr_html = f"<div style='margin-top: 8px;'><span style='background-color: #f8d7da; color: #721c24; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; border: 1px solid #f5c6cb;'>⚠️ <b>No Approved Data Available</b></span></div>"
