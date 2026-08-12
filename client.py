@@ -208,7 +208,6 @@ def server(input, output, session):
         job = current_job()
         if not job: return None, None, []
         
-        # FIX: Added approved_only=True to lock down the graphs
         df = get_universal_portal_data(job, lookback_days=42, is_summary_page=False, show_masked=False, show_baddata=False, approved_only=True)
         client = get_bq_client()
         
@@ -236,7 +235,6 @@ def server(input, output, session):
 
         ui_elements = []
         for i, loc in enumerate(valid_locs):
-            # Render empty containers for the native Plotly charts to populate
             ui_elements.append(
                 ui.card(
                     ui.layout_columns(
@@ -250,7 +248,8 @@ def server(input, output, session):
         return ui.TagList(*ui_elements)
 
     # Factory Generator to bind charts to their respective native outputs dynamically
-    def make_timeline_chart(index):
+    for i in range(MAX_CHARTS):
+        def make_timeline_chart(index):
             @output(id=f"timeline_chart_{index}")
             @render_plotly
             def _plot():
@@ -259,8 +258,6 @@ def server(input, output, session):
                     loc = locs[index]
                     loc_data = df[df['Location'] == loc]
                     client = get_bq_client()
-                    
-                    # Fetch dynamic timezone
                     proj_tz = project_timezone()
                     
                     fig = build_high_speed_graph(
