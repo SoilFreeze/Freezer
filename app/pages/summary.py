@@ -5,6 +5,10 @@ import pandas as pd
 from app.utils.config import PROJECT_REGISTRY_TABLE, NODE_REGISTRY_TABLE, MASTER_VIEW
 
 def get_summary_data(client, selected_project, show_archived, approved_only=False):
+    """
+    Pure Python function to retrieve all summary data matrices.
+    Returns: (active_projs_df, pool_df, tel_df, appr_df, error_msg)
+    """
     if client is None: return None, None, None, None, "Database connection unavailable."
 
     status_filter = "" if show_archived else "AND UPPER(TRIM(CAST(ShowActive AS STRING))) IN ('TRUE', 'YES', '1')"
@@ -32,10 +36,10 @@ def get_summary_data(client, selected_project, show_archived, approved_only=Fals
     try: 
         active_projs = client.query(proj_q).to_dataframe()
     except Exception as e: 
-        return None, None, None, f"Project Registry failed: {e}"
+        return None, None, None, None, f"Project Registry failed: {e}"
 
     if active_projs.empty:
-        return pd.DataFrame(), None, None, "No projects found in registry matching the criteria."
+        return pd.DataFrame(), None, None, None, "No projects found in registry matching the criteria."
 
     pool_q = f"""
         SELECT CAST(Project AS STRING) as Project, Phase, System, UPPER(CAST(Location AS STRING)) as Location, COUNT(DISTINCT NodeNum) as total_assigned
@@ -47,6 +51,7 @@ def get_summary_data(client, selected_project, show_archived, approved_only=Fals
     pool_df = client.query(pool_q).to_dataframe()
     pool_df[['Phase', 'System', 'Location']] = pool_df[['Phase', 'System', 'Location']].fillna('')
 
+    # Inject approval filter logic for the client portal
     approval_cond = "AND UPPER(CAST(approval_status AS STRING)) = 'TRUE'" if approved_only else ""
 
     summary_q = f"""
@@ -61,11 +66,27 @@ def get_summary_data(client, selected_project, show_archived, approved_only=Fals
         MaxTime AS (
             SELECT MAX(timestamp) as max_ts FROM raw_data
         )
-        # ... [Keep rest of summary_q the same] ...
+        SELECT 
+            r.Project, r.Phase, r.System, r.Bank, r.Location, r.Depth, r.NodeNum,
+            MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as min_now,
+            MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR) THEN r.temperature END) as max_now,
+            MIN(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as min_24h,
+            MAX(CASE WHEN r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR) THEN r.temperature END) as max_24h,
+            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 1 HOUR)) as checkins_1h,
+            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 6 HOUR)) as checkins_6h,
+            COUNTIF(r.timestamp >= TIMESTAMP_SUB(m.max_ts, INTERVAL 24 HOUR)) as checkins_24h,
+            ARRAY_AGG(r.temperature ORDER BY r.timestamp DESC LIMIT 1)[OFFSET(0)] as latest_temp,
+            MAX(r.timestamp) as latest_ts
+        FROM raw_data r CROSS JOIN MaxTime m
+        GROUP BY 1, 2, 3, 4, 5, 6, 7
     """
-    tel_df = client.query(summary_q).to_dataframe()
-    if not tel_df.empty:
-        tel_df[['Phase', 'System', 'Bank', 'Location']] = tel_df[['Phase', 'System', 'Bank', 'Location']].fillna('')
+    
+    try:
+        tel_df = client.query(summary_q).to_dataframe()
+        if not tel_df.empty:
+            tel_df[['Phase', 'System', 'Bank', 'Location']] = tel_df[['Phase', 'System', 'Bank', 'Location']].fillna('')
+    except Exception as e:
+        return active_projs, pool_df, None, None, f"Telemetry query failed: {e}"
 
     # Calculate absolute latest approval timestamp per job
     appr_q = f"""
