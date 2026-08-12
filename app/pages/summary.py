@@ -340,7 +340,7 @@ def summary_server(input, output, session, client, selected_project, global_show
                         ui.layout_columns(
                             ui.div(
                                 ui.h4(f"🏗️ {p_name}{title_suffix}"),
-                                ui.a(f"🔗 External Client Portal", href=f"https://sf{job_num}.streamlit.app", target="_blank")
+                                ui.a(f"🔗 External Client Portal", href=f"https://soilfreeze-client.share.connect.posit.cloud/?job={job_num}", target="_blank")
                             ),
                             ui.HTML(header_html)
                         ),
