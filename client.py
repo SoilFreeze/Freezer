@@ -201,6 +201,11 @@ def main():
     with st.spinner("Synchronizing official records..."):
         master_df = get_universal_portal_data(TARGET_JOB_NUMBER)
         
+    # --- NEW: Strict Client Portal Lockdown ---
+    # Strips out any row that doesn't explicitly have a 'TRUE' approval status
+    if master_df is not None and not master_df.empty and 'approval_status' in master_df.columns:
+        master_df = master_df[master_df['approval_status'].astype(str).str.strip().str.upper().isin(['TRUE', 'YES', '1'])]
+        
     if master_df is None or master_df.empty:
         st.warning("⚠️ No approved data records available yet.")
         return
