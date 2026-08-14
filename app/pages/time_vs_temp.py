@@ -1,5 +1,4 @@
 from shiny import ui, render, reactive, module
-from shinywidgets import output_widget, render_plotly
 import plotly.graph_objects as go
 import pandas as pd
 import os
@@ -11,67 +10,47 @@ from app.utils.config import PROJECT_ID, DATASET_ID
 from app.data.processor import get_universal_portal_data, apply_sanity_filter
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
 
-# The maximum number of stacked charts Shiny will pre-allocate
-MAX_CHARTS = 15
-
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 def natural_sort_key(text):
     return [int(c) if c.isdigit() else str(c).lower() for c in re.split(r'(\d+)', str(text))]
 
-def get_image_base64(img_path):
+def get_image_base64_from_file(img_path):
     with open(img_path, "rb") as image_file:
         encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
     ext = os.path.splitext(img_path)[1].lower().replace('.', '')
     if ext == 'jpg': ext = 'jpeg'
     return f"data:image/{ext};base64,{encoded_string}"
 
-def empty_fig(msg="Waiting for data..."):
-    """Generates a clear message instead of mysterious empty axes."""
-    fig = go.Figure()
-    fig.add_annotation(text=msg, xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="gray"))
-    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), plot_bgcolor="white")
-    return fig
+def plotly_to_base64_img(fig):
+    """Converts a Plotly figure to a base64 string for static HTML rendering."""
+    if not fig:
+        return ""
+    try:
+        # Requires 'kaleido' to be installed in the environment
+        img_bytes = fig.to_image(format="png", engine="kaleido")
+        encoded = base64.b64encode(img_bytes).decode("utf-8")
+        return f"data:image/png;base64,{encoded}"
+    except Exception as e:
+        print(f"Kaleido rendering error: {e}")
+        return ""
 
 # =============================================================================
 # SHINY UI MODULE
 # =============================================================================
 @module.ui
 def time_vs_temp_ui():
-    """Defines the visual layout for the Time vs Temp charts."""
-    
-    # Pre-allocate exactly 15 static chart containers. 
-    # The server will use CSS to un-hide the ones it needs.
-    chart_blocks = []
-    for i in range(MAX_CHARTS):
-        slot_id = module.resolve_id(f"chart_slot_{i}")
-        trend_id = module.resolve_id(f"trend_{i}")
-        map_id = module.resolve_id(f"map_{i}")
-        
-        card = ui.card(
-            ui.output_ui(f"header_{i}"),
-            ui.layout_columns(
-                ui.div(output_widget(trend_id, width="100%", height="750px")),
-                ui.div(output_widget(map_id, width="100%", height="750px")),
-                col_widths=[9, 3]
-            ),
-            id=slot_id,
-            style="display: none; margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
-        )
-        chart_blocks.append(card)
-
+    """Defines the visual layout for the static image charts."""
     return ui.div(
-        ui.div(output_widget("dummy_dependency"), style="display: none;"),
-        
-        ui.h2("📈 Time vs Temperature Tracking"),
+        ui.h2("📈 Time vs Temperature Tracking (Static View)"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
                 ui.output_ui("system_filter_ui"), 
-                ui.output_ui("dynamic_css_injector"),
                 ui.hr(),
-                # Inject the 15 pre-built stacked slots
-                ui.div(*chart_blocks)
+                
+                # A single output target for ALL dynamically generated static charts
+                ui.output_ui("stacked_static_charts") 
             ),
             ui.nav_panel("Site As-Builts",
                 ui.output_ui("as_builts_ui")
@@ -87,10 +66,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                         global_show_masked, global_show_baddata, global_show_map, 
                         global_show_elevation, unit_mode, unit_label, display_tz, 
                         active_refs, project_metadata):
-
-    @output(id="dummy_dependency")
-    @render_plotly
-    def _dummy(): return go.Figure()
 
     # --- REACTIVE DATA FETCHING ---
     @reactive.Calc
@@ -112,7 +87,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         if df.empty: return ui.HTML("")
         avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
         
-        # Only render the dropdown if there is actually more than 1 system to filter
         if len(avail_sys) > 1:
             return ui.input_selectize("selected_systems", "⚙️ Filter by System:", choices=avail_sys, multiple=True)
         return ui.HTML("")
@@ -125,8 +99,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
         
         sys_filter = []
-        # THE FIX: Only attempt to read the input if we know the UI actually drew it!
-        # This completely prevents the Shiny deadlock crash you were experiencing.
         if len(avail_sys) > 1:
             if hasattr(input, "selected_systems"):
                 sys_filter = input.selected_systems()
@@ -148,98 +120,85 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 
         return df, map_df, valid_locs
 
-    # --- CSS INJECTOR: Hides empty chart slots ---
+    # --- THE STATIC CHART GENERATOR ---
     @output
     @render.ui
-    def dynamic_css_injector():
-        _, _, locs = shared_chart_data()
-        num_locs = len(locs)
+    def stacked_static_charts():
+        """Generates all Plotly figures, converts them to static HTML images, and stacks them."""
+        df, map_df, locs = shared_chart_data()
+        if not locs:
+            return ui.p("Waiting for valid sensor data...", class_="text-muted")
+
+        u_mode = unit_mode() if callable(unit_mode) else unit_mode
+        u_lbl = unit_label() if callable(unit_label) else unit_label
+        tz = display_tz() if callable(display_tz) else display_tz
+        refs = active_refs() if callable(active_refs) else active_refs
+        days = lookback_days() if callable(lookback_days) else lookback_days
+        show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
+        proj = selected_project() if callable(selected_project) else selected_project
+        show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
+        show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
+        show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
         
-        css_rules = []
-        for i in range(MAX_CHARTS):
-            slot_id = session.ns(f"chart_slot_{i}")
-            if i < num_locs:
-                css_rules.append(f"#{slot_id} {{ display: block !important; }}")
-            else:
-                css_rules.append(f"#{slot_id} {{ display: none !important; }}")
-                
-        return ui.HTML(f"<style>{' '.join(css_rules)}</style>")
+        end_date = pd.Timestamp.now()
+        start_date = end_date - pd.Timedelta(days=days)
 
-    # --- STACKED CHART GENERATOR LOOP ---
-    for i in range(MAX_CHARTS):
-        def make_stacked_chart(idx):
+        p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
+        real_f_date = p_meta.get('Date_Freezedown')
+        freeze_start_ts = start_date
+        
+        parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+        if pd.notnull(parsed_date):
+            freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
+
+        cards = []
+        
+        # Loop through valid locations, render to image, and append to the DOM
+        for loc in locs:
+            loc_data = df[df['Location'] == loc]
+            if loc_data.empty:
+                continue
+
+            # 1. Build and convert Trend Graph
+            fig = build_high_speed_graph(
+                client=client, df=loc_data, title=f"Thermal Trends: {loc}",
+                start_view=start_date, end_view=end_date, active_refs=refs,
+                unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
+                f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
+                opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
+            )
+            trend_img_src = plotly_to_base64_img(fig)
+            trend_ui = ui.img(src=trend_img_src, style="width: 100%; max-width: 1200px; height: auto;") if trend_img_src else ui.p("Chart rendering failed (Check if kaleido is installed).", class_="text-danger")
+
+            # 2. Build and convert Map Graph
+            loc_clean = str(loc).strip().upper()
+            map_ui = ui.div()
             
-            @output(id=f"header_{idx}")
-            @render.ui
-            def _header():
-                _, _, locs = shared_chart_data()
-                if idx >= len(locs): return ui.HTML("")
-                return ui.h4(f"📍 Location: {locs[idx]}")
-
-            @output(id=f"trend_{idx}")
-            @render_plotly
-            def _trend():
-                df, _, locs = shared_chart_data()
-                if idx >= len(locs): return go.Figure()
-                
-                loc = locs[idx]
-                loc_data = df[df['Location'] == loc]
-                if loc_data.empty: return empty_fig(f"No valid sensor data for {loc}")
-                
-                u_mode = unit_mode() if callable(unit_mode) else unit_mode
-                u_lbl = unit_label() if callable(unit_label) else unit_label
-                tz = display_tz() if callable(display_tz) else display_tz
-                refs = active_refs() if callable(active_refs) else active_refs
-                days = lookback_days() if callable(lookback_days) else lookback_days
-                show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
-                proj = selected_project() if callable(selected_project) else selected_project
-                show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
-                show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
-                
-                end_date = pd.Timestamp.now()
-                start_date = end_date - pd.Timedelta(days=days)
-
-                p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
-                real_f_date = p_meta.get('Date_Freezedown')
-                freeze_start_ts = start_date
-                
-                parsed_date = pd.to_datetime(real_f_date, errors='coerce')
-                if pd.notnull(parsed_date):
-                    freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
-                
-                fig = build_high_speed_graph(
-                    client=client, df=loc_data, title=f"Thermal Trends: {loc}",
-                    start_view=start_date, end_view=end_date, active_refs=refs,
-                    unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
-                    f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
-                    opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
-                )
-                return fig if fig else empty_fig("Graph rendering failed internally.")
-
-            @output(id=f"map_{idx}")
-            @render_plotly
-            def _map():
-                _, map_df, locs = shared_chart_data()
-                if idx >= len(locs): return go.Figure()
-                
-                loc = locs[idx]
-                loc_clean = str(loc).strip().upper()
-                if not loc_clean.startswith('T') or map_df.empty: return go.Figure()
-                
-                show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
-                if not show_map_opt: return go.Figure()
-                
+            if loc_clean.startswith('T') and not map_df.empty and show_map_opt:
                 if 'Location' in map_df.columns and loc_clean in map_df['Location'].values:
-                    proj = selected_project() if callable(selected_project) else selected_project
                     job_num = proj.split('-')[0].strip() if proj else ""
                     as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
                     
                     map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
-                    return map_fig if map_fig else go.Figure()
-                return go.Figure()
+                    map_img_src = plotly_to_base64_img(map_fig)
+                    
+                    if map_img_src:
+                        map_ui = ui.img(src=map_img_src, style="width: 100%; max-width: 400px; height: auto;")
 
-        # Execute the loop closure
-        make_stacked_chart(i)
+            # 3. Assemble the visual card
+            card = ui.card(
+                ui.h4(f"📍 Location: {loc}"),
+                ui.layout_columns(
+                    ui.div(trend_ui),
+                    ui.div(map_ui),
+                    col_widths=[9, 3]
+                ),
+                style="margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+            )
+            cards.append(card)
+
+        # Return the entire stack to the UI at once
+        return ui.div(*cards)
 
     # --- 3. AS-BUILTS ENGINE ---
     @output
@@ -265,7 +224,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         img_blocks = [ui.h4(f"Site As-Builts: {proj}")]
         for img_path in found_images:
             try:
-                b64_src = get_image_base64(img_path)
+                b64_src = get_image_base64_from_file(img_path)
                 img_blocks.append(ui.img(src=b64_src, style="max-width: 100%; height: auto; margin-bottom: 20px; border: 1px solid #ddd; padding: 5px; border-radius: 5px;"))
                 img_blocks.append(ui.hr())
             except Exception as e:
