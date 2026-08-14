@@ -27,6 +27,13 @@ def get_image_base64(img_path):
     if ext == 'jpg': ext = 'jpeg'
     return f"data:image/{ext};base64,{encoded_string}"
 
+def empty_fig(msg="Waiting for data..."):
+    """Generates a clear message instead of mysterious empty axes."""
+    fig = go.Figure()
+    fig.add_annotation(text=msg, xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="gray"))
+    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), plot_bgcolor="white")
+    return fig
+
 # =============================================================================
 # SHINY UI MODULE
 # =============================================================================
@@ -35,7 +42,7 @@ def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
     
     # Pre-allocate exactly 15 static chart containers. 
-    # The server will use CSS to hide the ones it doesn't need.
+    # The server will use CSS to un-hide the ones it needs.
     chart_blocks = []
     for i in range(MAX_CHARTS):
         slot_id = module.resolve_id(f"chart_slot_{i}")
@@ -50,18 +57,17 @@ def time_vs_temp_ui():
                 col_widths=[9, 3]
             ),
             id=slot_id,
-            style="display: none; margin-bottom: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+            style="display: none; margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
         )
         chart_blocks.append(card)
 
     return ui.div(
-        # Trojan horse to force Javascript engine loading
         ui.div(output_widget("dummy_dependency"), style="display: none;"),
         
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
-                ui.output_ui("system_filter_ui"), # Reverted to the working dynamic UI
+                ui.output_ui("system_filter_ui"), 
                 ui.output_ui("dynamic_css_injector"),
                 ui.hr(),
                 # Inject the 15 pre-built stacked slots
@@ -99,13 +105,14 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         raw_data = get_universal_portal_data(proj, lookback_days=days, is_summary_page=False, show_masked=show_m, show_baddata=show_b)
         return apply_sanity_filter(raw_data)
 
-    # Reverted back to the dynamic UI renderer that successfully populated for you
     @output
     @render.ui
     def system_filter_ui():
         df = get_raw_data()
         if df.empty: return ui.HTML("")
         avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        
+        # Only render the dropdown if there is actually more than 1 system to filter
         if len(avail_sys) > 1:
             return ui.input_selectize("selected_systems", "⚙️ Filter by System:", choices=avail_sys, multiple=True)
         return ui.HTML("")
@@ -115,12 +122,14 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         df = get_raw_data()
         if df.empty: return pd.DataFrame(), pd.DataFrame(), []
         
-        # Safely read the dropdown filter without crashing the graph
+        avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        
         sys_filter = []
-        try:
-            sys_filter = input.selected_systems()
-        except Exception:
-            pass
+        # THE FIX: Only attempt to read the input if we know the UI actually drew it!
+        # This completely prevents the Shiny deadlock crash you were experiencing.
+        if len(avail_sys) > 1:
+            if hasattr(input, "selected_systems"):
+                sys_filter = input.selected_systems()
             
         if sys_filter:
             df = df[df['System'].astype(str).isin(sys_filter)]
@@ -175,7 +184,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 
                 loc = locs[idx]
                 loc_data = df[df['Location'] == loc]
-                if loc_data.empty: return go.Figure()
+                if loc_data.empty: return empty_fig(f"No valid sensor data for {loc}")
                 
                 u_mode = unit_mode() if callable(unit_mode) else unit_mode
                 u_lbl = unit_label() if callable(unit_label) else unit_label
@@ -205,7 +214,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                     f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
                     opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
                 )
-                return fig if fig else go.Figure()
+                return fig if fig else empty_fig("Graph rendering failed internally.")
 
             @output(id=f"map_{idx}")
             @render_plotly
