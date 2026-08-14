@@ -114,16 +114,28 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         
         return df, map_df, valid_locations
 
+    @reactive.Calc
+    def shared_chart_data():
+        df = get_clean_data()
+        if df.empty: return None, None, []
+        
+        # FIX: Reverted to natural hasattr tracking so reactivity isn't blocked
+        sys_filter = input.selected_systems() if hasattr(input, 'selected_systems') else []
+            
+        if sys_filter:
+            df = df[df['System'].astype(str).isin(sys_filter)]
+            
+        map_df = get_map_coords()
+        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
+        
+        return df, map_df, valid_locations
+
     # --- 2. DYNAMIC LAYOUT ROUTER (CSS INJECTION) ---
     @output
     @render.ui
     def layout_css_injector():
         """Dynamically shows or hides the map container via CSS without destroying the widget."""
-        try:
-            target_loc = input.target_location()
-        except AttributeError:
-            return ui.HTML("")
-            
+        target_loc = input.target_location() if hasattr(input, 'target_location') else None
         if not target_loc: return ui.HTML("")
 
         _, map_df, _ = shared_chart_data()
@@ -145,11 +157,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
     @output(id="main_trend_chart")
     @render_plotly
     def _plot():
-        try:
-            target_loc = input.target_location()
-        except AttributeError:
-            return None
-            
+        target_loc = input.target_location() if hasattr(input, 'target_location') else None
         if not target_loc: return None
 
         df, _, _ = shared_chart_data()
@@ -158,7 +166,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         loc_data = df[df['Location'] == target_loc]
         if loc_data.empty: return None
 
-        # Resolve context variables
         u_mode = unit_mode() if callable(unit_mode) else unit_mode
         u_lbl = unit_label() if callable(unit_label) else unit_label
         tz = display_tz() if callable(display_tz) else display_tz
