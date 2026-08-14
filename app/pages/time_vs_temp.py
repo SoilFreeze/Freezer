@@ -1,6 +1,6 @@
 from shiny import ui, render, reactive, module
 from shinywidgets import output_widget, render_plotly
-import plotly.graph_objects as go
+from shiny.errors import SilentException
 import pandas as pd
 import os
 import re
@@ -11,7 +11,8 @@ from app.utils.config import PROJECT_ID, DATASET_ID
 from app.data.processor import get_universal_portal_data, apply_sanity_filter
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
 
-MAX_CHARTS = 20  # The maximum number of stacked charts allowed
+# Define how many charts we support stacking on a single page
+MAX_CHARTS = 15 
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -33,20 +34,31 @@ def get_image_base64(img_path):
 def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
     
-    # Pre-allocate 20 empty UI slots that the server can dynamically activate
-    chart_placeholders = [ui.output_ui(f"chart_card_{i}") for i in range(MAX_CHARTS)]
-    
+    # 1. PRE-ALLOCATE STATIC SLOTS
+    # We bake these directly into the UI so the Javascript engine NEVER loses track of them.
+    chart_blocks = []
+    for i in range(MAX_CHARTS):
+        chart_blocks.append(
+            ui.div(
+                ui.output_ui(f"header_{i}"),
+                ui.layout_columns(
+                    ui.div(output_widget(f"trend_{i}", width="100%", height="700px")),
+                    ui.div(output_widget(f"map_{i}", width="100%", height="400px")),
+                    col_widths=[9, 3]
+                ),
+                id=f"chart_slot_{i}",  # CSS target
+                style="display: none; padding: 20px; border: 1px solid #ddd; margin-bottom: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); background: white;"
+            )
+        )
+
     return ui.div(
-        # Hidden dummy widget ensures the browser downloads Plotly's JS engine on load
-        ui.div(output_widget("dummy_dependency"), style="display: none;"),
-        
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
                 ui.output_ui("system_filter_ui"),
+                ui.output_ui("dynamic_css_injector"), # Hides/Shows slots automatically
                 ui.hr(),
-                # Inject our 20 pre-allocated slots here
-                ui.div(*chart_placeholders)
+                ui.div(*chart_blocks)
             ),
             ui.nav_panel("Site As-Builts",
                 ui.output_ui("as_builts_ui")
@@ -63,15 +75,10 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                         global_show_elevation, unit_mode, unit_label, display_tz, 
                         active_refs, project_metadata):
 
-    # Prevent Shiny from complaining about the unrendered dummy widget
-    @output(id="dummy_dependency")
-    @render_plotly
-    def _dummy(): return go.Figure()
-
-    # --- REACTIVE DATA FETCHING ---
+    # --- REACTIVE DATA MASTER ---
     @reactive.Calc
     def master_data():
-        """Single highly-optimized reactive calc for all data."""
+        """Fetches all data once to be shared efficiently across all 15 charts."""
         proj = selected_project() if callable(selected_project) else selected_project
         if not proj or proj == "All Projects": 
             return pd.DataFrame(), [], pd.DataFrame()
@@ -85,10 +92,15 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         
         if df.empty: return pd.DataFrame(), [], pd.DataFrame()
         
-        # Safely pull system filters without breaking reactivity
+        # Safe Input Tracking
         sys_filter = []
-        if 'selected_systems' in input:
-            sys_filter = input.selected_systems()
+        try:
+            if hasattr(input, 'selected_systems'):
+                sys_filter = input.selected_systems()
+        except SilentException:
+            raise
+        except Exception:
+            pass
             
         if sys_filter:
             df = df[df['System'].astype(str).isin(sys_filter)]
@@ -99,14 +111,15 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         map_df = pd.DataFrame()
         job_num = proj.split('-')[0].strip() if proj else ""
         try:
-            map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
-            map_df = client.query(map_query).to_dataframe()
-        except:
+            if job_num:
+                map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
+                map_df = client.query(map_query).to_dataframe()
+        except Exception:
             pass
             
         return df, valid_locs, map_df
 
-    # --- 1. UI RENDERING (DROPDOWNS) ---
+    # --- 1. UI RENDERING (DROPDOWNS & CSS) ---
     @output
     @render.ui
     def system_filter_ui():
@@ -117,52 +130,39 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             return ui.input_selectize("selected_systems", "⚙️ Filter by System:", avail_sys, multiple=True)
         return ui.HTML("")
 
+    @output
+    @render.ui
+    def dynamic_css_injector():
+        """Dynamically enables the display of pre-allocated UI slots based on data length."""
+        _, locs, _ = master_data()
+        num_locs = len(locs)
+        
+        css_rules = []
+        for i in range(MAX_CHARTS):
+            if i < num_locs:
+                css_rules.append(f"#chart_slot_{i} {{ display: block !important; }}")
+            else:
+                css_rules.append(f"#chart_slot_{i} {{ display: none !important; }}")
+                
+        return ui.HTML(f"<style>{' '.join(css_rules)}</style>")
+
     # --- 2. DYNAMIC CHART GENERATORS ---
-    # We loop exactly 20 times, mapping 1 renderer to 1 UI slot. 
+    # Python closure factory to cleanly bind the loop index to the renderers
     for i in range(MAX_CHARTS):
-        def make_block(idx):
+        def make_renderers(idx):
             
-            # A. Render the UI Box
-            @output(id=f"chart_card_{idx}")
+            # 2A. Header text
+            @output(id=f"header_{idx}")
             @render.ui
-            def _card_ui():
-                _, locs, map_df = master_data()
-                
-                # If there are fewer than 'idx' locations, this slot returns empty (invisible)
+            def _header():
+                _, locs, _ = master_data()
                 if idx >= len(locs): return ui.HTML("")
-                
-                loc = locs[idx]
-                loc_clean = str(loc).strip().upper()
-                
-                has_map = False
-                if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
-                    if loc_clean in map_df['Location'].values:
-                        has_map = True
-                
-                show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
-                
-                chart_id = session.ns(f"trend_chart_{idx}")
-                map_id = session.ns(f"map_chart_{idx}")
-                
-                if has_map and show_map_opt:
-                    return ui.card(
-                        ui.layout_columns(
-                            ui.div(output_widget(chart_id, height="750px")),
-                            ui.div(output_widget(map_id, height="750px")),
-                            col_widths=[9, 3]
-                        ),
-                        style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 25px;"
-                    )
-                else:
-                    return ui.card(
-                        output_widget(chart_id, width="100%", height="750px"),
-                        style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 25px;"
-                    )
-                    
-            # B. Render the Line Graph
-            @output(id=f"trend_chart_{idx}")
+                return ui.h4(f"📍 Location: {locs[idx]}")
+
+            # 2B. Line Graph
+            @output(id=f"trend_{idx}")
             @render_plotly
-            def _trend_plot():
+            def _trend():
                 df, locs, _ = master_data()
                 if idx >= len(locs): return None
                 loc = locs[idx]
@@ -199,11 +199,11 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                     opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
                 )
                 return fig
-                
-            # C. Render the Map (if active)
-            @output(id=f"map_chart_{idx}")
+
+            # 2C. Site Map
+            @output(id=f"map_{idx}")
             @render_plotly
-            def _map_plot():
+            def _map():
                 _, locs, map_df = master_data()
                 if idx >= len(locs): return None
                 loc = locs[idx]
@@ -211,15 +211,20 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 loc_clean = str(loc).strip().upper()
                 if not loc_clean.startswith('T') or map_df.empty: return None
                 
-                proj = selected_project() if callable(selected_project) else selected_project
-                job_num = proj.split('-')[0].strip() if proj else ""
-                as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+                show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
+                if not show_map_opt: return None
                 
-                map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
-                return map_fig
+                if 'Location' in map_df.columns and loc_clean in map_df['Location'].values:
+                    proj = selected_project() if callable(selected_project) else selected_project
+                    job_num = proj.split('-')[0].strip() if proj else ""
+                    as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+                    
+                    map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
+                    return map_fig
+                return None
 
-        # Execute closure block for the current index
-        make_block(i)
+        # Execute the closure for this index
+        make_renderers(i)
 
     # --- 3. AS-BUILTS ENGINE ---
     @output
