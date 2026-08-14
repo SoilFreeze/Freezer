@@ -29,6 +29,11 @@ def get_image_base64(img_path):
 @module.ui
 def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
+    
+    # FIX: Manually resolve the module namespace for 3rd-party widgets
+    chart_id = module.resolve_id("main_trend_chart")
+    map_id = module.resolve_id("main_map_chart")
+    
     return ui.div(
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
@@ -39,18 +44,16 @@ def time_vs_temp_ui():
                 ),
                 ui.hr(),
                 
-                # FIX: Define both widgets in the STATIC UI so JavaScript binds to them on page load.
-                # We use Flexbox and a hidden CSS injector to handle the layout dynamically instead.
+                # Static Flexbox with properly namespaced IDs
                 ui.card(
                     ui.div(
-                        ui.div(output_widget("main_trend_chart", width="100%", height="750px"), style="flex-grow: 1; min-width: 0;"),
-                        ui.div(output_widget("main_map_chart", width="100%", height="750px"), id="time_temp_map_wrapper", style="width: 25%; min-width: 300px; display: none;"),
+                        ui.div(output_widget(chart_id, width="100%", height="750px"), style="flex-grow: 1; min-width: 0;"),
+                        ui.div(output_widget(map_id, width="100%", height="750px"), id="time_temp_map_wrapper", style="width: 25%; min-width: 300px; display: none;"),
                         style="display: flex; gap: 15px; width: 100%;"
                     ),
                     style="box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
                 ),
                 
-                # Invisible UI element that will output our dynamic <style> tags
                 ui.output_ui("layout_css_injector")
             ),
             ui.nav_panel("Site As-Builts",
