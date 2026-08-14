@@ -1,4 +1,5 @@
 from shiny import App, ui, render, reactive
+from shinywidgets import output_widget
 import pandas as pd
 import time
 import os
@@ -21,6 +22,9 @@ from app.pages.time_vs_temp import time_vs_temp_ui, time_vs_temp_server
 # 1. UI SETUP & SIDEBAR NAVIGATION
 # =============================================================================
 app_ui = ui.page_fluid(
+    # FIX: Invisible widget forces Shiny to load Plotly/JS dependencies globally on app startup
+    ui.div(output_widget("global_js_dependency"), style="display: none;"),
+    
     ui.panel_title("❄️ SoilFreeze Data Lab"),
     ui.layout_sidebar(
         ui.sidebar(
@@ -38,6 +42,7 @@ app_ui = ui.page_fluid(
                     "Admin Tools"
                 ]
             ),
+
             ui.output_ui("project_selector_ui"),
             ui.output_ui("data_pulse_ui"),
             ui.input_action_button("refresh_btn", "🔄 Refresh Data", class_="btn-primary w-100"),
