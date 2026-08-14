@@ -32,11 +32,9 @@ def time_vs_temp_ui():
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
-                ui.layout_columns(
-                    ui.output_ui("system_filter_ui")
-                ),
+                ui.output_ui("system_filter_ui"),
                 ui.hr(),
-                # This will hold all our stacked HTML charts
+                # This will hold all our stacked HTML iframe charts
                 ui.output_ui("stacked_charts_ui")
             ),
             ui.nav_panel("Site As-Builts",
@@ -67,37 +65,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         raw_data = get_universal_portal_data(proj, lookback_days=days, is_summary_page=False, show_masked=show_m, show_baddata=show_b)
         return apply_sanity_filter(raw_data)
 
-    @reactive.Calc
-    def get_map_coords():
-        proj = selected_project() if callable(selected_project) else selected_project
-        if not proj or proj == "All Projects" or client is None: return pd.DataFrame()
-        job_num = proj.split('-')[0].strip()
-        try:
-            map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
-            return client.query(map_query).to_dataframe()
-        except:
-            return pd.DataFrame()
-
-    @reactive.Calc
-    def shared_chart_data():
-        df = get_clean_data()
-        if df.empty: return None, None, []
-        
-        sys_filter = []
-        try:
-            if hasattr(input, 'selected_systems'):
-                sys_filter = input.selected_systems()
-        except Exception:
-            pass
-            
-        if sys_filter:
-            df = df[df['System'].astype(str).isin(sys_filter)]
-            
-        map_df = get_map_coords()
-        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
-        
-        return df, map_df, valid_locations
-
     # --- 1. UI RENDERING (DROPDOWNS) ---
     @output
     @render.ui
@@ -113,18 +80,38 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
     @output
     @render.ui
     def stacked_charts_ui():
-        df, map_df, valid_locations = shared_chart_data()
-        if not valid_locations: 
-            return ui.p("Processing data...", class_="text-muted")
+        df = get_clean_data()
+        if df.empty:
+            return ui.p("No data available for this project/timeframe.", class_="text-muted")
 
-        # Resolve context variables once for all charts
+        # Safely filter systems without breaking Shiny's reactive graph
+        try:
+            sys_filter = input.selected_systems()
+            if sys_filter:
+                df = df[df['System'].astype(str).isin(sys_filter)]
+        except Exception:
+            pass 
+
+        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
+        if not valid_locations:
+            return ui.p("No valid locations found.", class_="text-muted")
+
+        # Fetch Map Coordinates
+        proj = selected_project() if callable(selected_project) else selected_project
+        job_num = proj.split('-')[0].strip() if proj else ""
+        try:
+            map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
+            map_df = client.query(map_query).to_dataframe()
+        except:
+            map_df = pd.DataFrame()
+
+        # Resolve context variables
         u_mode = unit_mode() if callable(unit_mode) else unit_mode
         u_lbl = unit_label() if callable(unit_label) else unit_label
         tz = display_tz() if callable(display_tz) else display_tz
         refs = active_refs() if callable(active_refs) else active_refs
         days = lookback_days() if callable(lookback_days) else lookback_days
         show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
-        proj = selected_project() if callable(selected_project) else selected_project
         show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
         show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
         show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
@@ -142,7 +129,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
 
         chart_blocks = []
 
-        # Loop through every location and stack them just like Streamlit
+        # Stack every valid location
         for loc in valid_locations:
             loc_data = df[df['Location'] == loc]
             if loc_data.empty: continue
@@ -158,43 +145,44 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             
             if not fig: continue
             
-            # BYPASS: Convert the Plotly figure directly into raw HTML with its own JS bundle
-            chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+            # 💡 THE BYPASS: Create an isolated Iframe document for the chart
+            chart_html = fig.to_html(full_html=True, include_plotlyjs='cdn')
+            chart_iframe = ui.tags.iframe(srcdoc=chart_html, style="width: 100%; height: 750px; border: none;")
             
             # Check Map Data
             loc_clean = str(loc).strip().upper()
             has_map = False
-            map_html = ""
+            map_iframe = None
+            
             if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
                 if loc_clean in map_df['Location'].values:
                     has_map = True
                     
             if has_map and show_map_opt:
-                job_num = proj.split('-')[0].strip()
                 as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
                 map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
                 if map_fig:
-                    map_html = map_fig.to_html(full_html=False, include_plotlyjs='cdn')
+                    map_html = map_fig.to_html(full_html=True, include_plotlyjs='cdn')
+                    map_iframe = ui.tags.iframe(srcdoc=map_html, style="width: 100%; height: 750px; border: none;")
 
-            # Build UI Card for this location
-            if map_html:
+            # Assemble Card Layout
+            if map_iframe:
                 card = ui.card(
                     ui.layout_columns(
-                        ui.div(ui.HTML(chart_html)),
-                        ui.div(ui.HTML(map_html)),
+                        ui.div(chart_iframe),
+                        ui.div(map_iframe),
                         col_widths=[9, 3]
                     ),
                     style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 30px;"
                 )
             else:
                 card = ui.card(
-                    ui.div(ui.HTML(chart_html)),
+                    ui.div(chart_iframe),
                     style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 30px;"
                 )
                 
             chart_blocks.append(card)
 
-        # Return all 10+ stacked graphs
         return ui.div(*chart_blocks)
 
     # --- 3. AS-BUILTS ENGINE ---
