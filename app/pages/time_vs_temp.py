@@ -1,6 +1,5 @@
 from shiny import ui, render, reactive, module
 from shinywidgets import output_widget, render_plotly
-from shiny.errors import SilentException
 import pandas as pd
 import os
 import re
@@ -97,8 +96,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         try:
             if hasattr(input, 'selected_systems'):
                 sys_filter = input.selected_systems()
-        except SilentException:
-            raise
         except Exception:
             pass
             
