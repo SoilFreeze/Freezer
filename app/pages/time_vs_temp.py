@@ -11,8 +11,6 @@ from app.utils.config import PROJECT_ID, DATASET_ID
 from app.data.processor import get_universal_portal_data, apply_sanity_filter
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
 
-MAX_CHARTS = 15
-
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -33,34 +31,31 @@ def get_image_base64(img_path):
 def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
     
-    chart_blocks = []
-    for i in range(MAX_CHARTS):
-        # FIX: Manually resolve the ID so our CSS injector can safely target it
-        slot_id = module.resolve_id(f"chart_slot_{i}")
-        
-        chart_blocks.append(
-            ui.div(
-                ui.output_ui(f"header_{i}"),
-                ui.layout_columns(
-                    ui.div(output_widget(f"trend_{i}", width="100%", height="700px")),
-                    ui.div(output_widget(f"map_{i}", width="100%", height="400px")),
-                    col_widths=[9, 3]
-                ),
-                id=slot_id,
-                style="display: none; padding: 20px; border: 1px solid #ddd; margin-bottom: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); background: white;"
-            )
-        )
-
+    # Manually resolve IDs so our CSS injector can safely target the map wrapper
+    chart_id = module.resolve_id("main_trend_chart")
+    map_id = module.resolve_id("main_map_chart")
+    wrapper_id = module.resolve_id("map_wrapper")
+    
     return ui.div(
-        ui.div(output_widget("dummy_dependency"), style="display: none;"),
-        
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
-                ui.output_ui("system_filter_ui"),
-                ui.output_ui("dynamic_css_injector"),
+                ui.layout_columns(
+                    ui.output_ui("system_filter_ui"),
+                    ui.output_ui("location_selector_ui")
+                ),
                 ui.hr(),
-                ui.div(*chart_blocks)
+                ui.output_ui("layout_css_injector"),
+                
+                # STATIC WIDGET PLACEMENT (Fixes the "flat line" bug)
+                ui.card(
+                    ui.div(
+                        ui.div(output_widget(chart_id, width="100%", height="750px"), style="flex-grow: 1; min-width: 0;"),
+                        ui.div(output_widget(map_id, width="100%", height="750px"), id=wrapper_id, style="width: 25%; min-width: 300px; display: none;"),
+                        style="display: flex; gap: 15px; width: 100%;"
+                    ),
+                    style="box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                )
             ),
             ui.nav_panel("Site As-Builts",
                 ui.output_ui("as_builts_ui")
@@ -77,18 +72,12 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                         global_show_elevation, unit_mode, unit_label, display_tz, 
                         active_refs, project_metadata):
 
-    @output(id="dummy_dependency")
-    @render_plotly
-    def _dummy(): return go.Figure()
-
-    # --- REACTIVE DATA (BROKEN APART TO PREVENT CIRCULAR DEPENDENCIES) ---
-    
+    # --- REACTIVE DATA FETCHING ---
     @reactive.Calc
-    def base_data():
-        """Fetches raw data ONLY. No UI inputs allowed here."""
+    def get_clean_data():
         proj = selected_project() if callable(selected_project) else selected_project
         if not proj or proj == "All Projects": return pd.DataFrame()
-            
+        
         days = lookback_days() if callable(lookback_days) else lookback_days
         show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
         show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
@@ -97,9 +86,9 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         return apply_sanity_filter(raw_data)
 
     @reactive.Calc
-    def map_data():
+    def get_map_coords():
         proj = selected_project() if callable(selected_project) else selected_project
-        if not proj or proj == "All Projects": return pd.DataFrame()
+        if not proj or proj == "All Projects" or client is None: return pd.DataFrame()
         job_num = proj.split('-')[0].strip()
         try:
             map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
@@ -108,30 +97,28 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             return pd.DataFrame()
 
     @reactive.Calc
-    def filtered_data():
-        """Applies filters to the base data."""
-        df = base_data()
-        if df.empty: return df, [], pd.DataFrame()
+    def shared_chart_data():
+        df = get_clean_data()
+        if df.empty: return None, None, []
         
+        # Reactive-safe input checking
         sys_filter = []
-        if 'selected_systems' in input:
+        if "selected_systems" in input:
             sys_filter = input.selected_systems()
             
         if sys_filter:
             df = df[df['System'].astype(str).isin(sys_filter)]
             
-        valid_locs = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
-        m_df = map_data()
+        map_df = get_map_coords()
+        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
         
-        return df, valid_locs, m_df
+        return df, map_df, valid_locations
 
-    # --- 1. UI RENDERING ---
-    
+    # --- 1. UI RENDERING (DROPDOWNS) ---
     @output
     @render.ui
     def system_filter_ui():
-        # FIX: UI relies on BASE data so it doesn't trigger a circular loop
-        df = base_data()
+        df = get_clean_data()
         if df.empty: return ui.HTML("")
         avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
         if len(avail_sys) > 1:
@@ -140,96 +127,99 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
 
     @output
     @render.ui
-    def dynamic_css_injector():
-        _, locs, _ = filtered_data()
-        num_locs = len(locs)
+    def location_selector_ui():
+        _, _, valid_locations = shared_chart_data()
+        if not valid_locations: return ui.HTML("")
+        return ui.input_select("target_location", "📍 Select Location to Inspect:", valid_locations)
+
+    @output
+    @render.ui
+    def layout_css_injector():
+        """Dynamically shows or hides the map container based on data."""
+        if "target_location" not in input: return ui.HTML("")
+        target_loc = input.target_location()
+        if not target_loc: return ui.HTML("")
+
+        _, map_df, _ = shared_chart_data()
+        show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
         
-        css_rules = []
-        for i in range(MAX_CHARTS):
-            # FIX: Manually resolve the namespace so CSS can find the UI element
-            slot_id = session.ns(f"chart_slot_{i}")
-            if i < num_locs:
-                css_rules.append(f"#{slot_id} {{ display: block !important; }}")
-            else:
-                css_rules.append(f"#{slot_id} {{ display: none !important; }}")
-                
-        return ui.HTML(f"<style>{' '.join(css_rules)}</style>")
+        loc_clean = str(target_loc).strip().upper()
+        
+        has_map = False
+        if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
+            if loc_clean in map_df['Location'].values:
+                has_map = True
 
-    # --- 2. DYNAMIC CHART GENERATORS ---
-    
-    for i in range(MAX_CHARTS):
-        def make_renderers(idx):
-            
-            @output(id=f"header_{idx}")
-            @render.ui
-            def _header():
-                _, locs, _ = filtered_data()
-                if idx >= len(locs): return ui.HTML("")
-                return ui.h4(f"📍 Location: {locs[idx]}")
+        wrapper_id = session.ns("map_wrapper")
+        if has_map and show_map_opt:
+            return ui.HTML(f"<style>#{wrapper_id} {{ display: block !important; }}</style>")
+        else:
+            return ui.HTML(f"<style>#{wrapper_id} {{ display: none !important; }}</style>")
 
-            @output(id=f"trend_{idx}")
-            @render_plotly
-            def _trend():
-                df, locs, _ = filtered_data()
-                if idx >= len(locs): return go.Figure()
-                loc = locs[idx]
-                
-                loc_data = df[df['Location'] == loc]
-                if loc_data.empty: return go.Figure()
-                
-                u_mode = unit_mode() if callable(unit_mode) else unit_mode
-                u_lbl = unit_label() if callable(unit_label) else unit_label
-                tz = display_tz() if callable(display_tz) else display_tz
-                refs = active_refs() if callable(active_refs) else active_refs
-                days = lookback_days() if callable(lookback_days) else lookback_days
-                show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
-                proj = selected_project() if callable(selected_project) else selected_project
-                show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
-                show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
-                
-                end_date = pd.Timestamp.now()
-                start_date = end_date - pd.Timedelta(days=days)
+    # --- 2. NATIVE PLOTLY RENDERERS ---
+    @output(id="main_trend_chart")
+    @render_plotly
+    def _plot():
+        if "target_location" not in input: return go.Figure()
+        target_loc = input.target_location()
+        if not target_loc: return go.Figure()
 
-                p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
-                real_f_date = p_meta.get('Date_Freezedown')
-                freeze_start_ts = start_date
-                
-                parsed_date = pd.to_datetime(real_f_date, errors='coerce')
-                if pd.notnull(parsed_date):
-                    freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
-                
-                fig = build_high_speed_graph(
-                    client=client, df=loc_data, title=f"Thermal Trends: {loc}",
-                    start_view=start_date, end_view=end_date, active_refs=refs,
-                    unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
-                    f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
-                    opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
-                )
-                return fig if fig else go.Figure()
+        df, _, _ = shared_chart_data()
+        if df is None or df.empty: return go.Figure()
 
-            @output(id=f"map_{idx}")
-            @render_plotly
-            def _map():
-                _, locs, map_df = filtered_data()
-                if idx >= len(locs): return go.Figure()
-                loc = locs[idx]
-                
-                loc_clean = str(loc).strip().upper()
-                if not loc_clean.startswith('T') or map_df.empty: return go.Figure()
-                
-                show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
-                if not show_map_opt: return go.Figure()
-                
-                if 'Location' in map_df.columns and loc_clean in map_df['Location'].values:
-                    proj = selected_project() if callable(selected_project) else selected_project
-                    job_num = proj.split('-')[0].strip() if proj else ""
-                    as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
-                    
-                    map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
-                    return map_fig if map_fig else go.Figure()
-                return go.Figure()
+        loc_data = df[df['Location'] == target_loc]
+        if loc_data.empty: return go.Figure()
 
-        make_renderers(i)
+        u_mode = unit_mode() if callable(unit_mode) else unit_mode
+        u_lbl = unit_label() if callable(unit_label) else unit_label
+        tz = display_tz() if callable(display_tz) else display_tz
+        refs = active_refs() if callable(active_refs) else active_refs
+        days = lookback_days() if callable(lookback_days) else lookback_days
+        show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
+        proj = selected_project() if callable(selected_project) else selected_project
+        
+        show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
+        show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
+        
+        end_date = pd.Timestamp.now()
+        start_date = end_date - pd.Timedelta(days=days)
+
+        p_meta = project_metadata.get() if hasattr(project_metadata, 'get') else {}
+        real_f_date = p_meta.get('Date_Freezedown')
+        freeze_start_ts = start_date
+        
+        parsed_date = pd.to_datetime(real_f_date, errors='coerce')
+        if pd.notnull(parsed_date):
+            freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
+        
+        fig = build_high_speed_graph(
+            client=client, df=loc_data, title=f"Thermal Trends: {target_loc}",
+            start_view=start_date, end_view=end_date, active_refs=refs,
+            unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
+            f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
+            opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
+        )
+        return fig if fig else go.Figure()
+
+    @output(id="main_map_chart")
+    @render_plotly
+    def _map():
+        if "target_location" not in input: return go.Figure()
+        target_loc = input.target_location()
+        if not target_loc: return go.Figure()
+
+        _, map_df, _ = shared_chart_data()
+        if map_df.empty: return go.Figure()
+
+        loc_clean = str(target_loc).strip().upper()
+        if not loc_clean.startswith('T'): return go.Figure()
+
+        proj = selected_project() if callable(selected_project) else selected_project
+        job_num = proj.split('-')[0].strip()
+        as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+        
+        map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
+        return map_fig if map_fig else go.Figure()
 
     # --- 3. AS-BUILTS ENGINE ---
     @output
