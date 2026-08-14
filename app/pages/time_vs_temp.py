@@ -2,12 +2,12 @@ from shiny import ui, render, reactive, module
 import pandas as pd
 import os
 import re
+import base64
 
 # Internal Imports
 from app.utils.config import PROJECT_ID, DATASET_ID
 from app.data.processor import get_universal_portal_data, apply_sanity_filter
 from app.components.charts import build_high_speed_graph, build_cropped_site_map
-import base64
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -22,6 +22,16 @@ def get_image_base64(img_path):
     if ext == 'jpg': ext = 'jpeg'
     return f"data:image/{ext};base64,{encoded_string}"
 
+def create_plotly_b64_iframe(fig):
+    """Converts a Plotly figure to a Base64 Data URI to bypass HTML parsing errors."""
+    if not fig: return None
+    html_str = fig.to_html(full_html=True, include_plotlyjs='cdn')
+    b64_str = base64.b64encode(html_str.encode('utf-8')).decode('utf-8')
+    return ui.tags.iframe(
+        src=f"data:text/html;base64,{b64_str}", 
+        style="width: 100%; height: 750px; border: none;"
+    )
+
 # =============================================================================
 # SHINY UI MODULE
 # =============================================================================
@@ -34,7 +44,7 @@ def time_vs_temp_ui():
             ui.nav_panel("Telemetry Charts",
                 ui.output_ui("system_filter_ui"),
                 ui.hr(),
-                # This will hold all our stacked HTML iframe charts
+                # This will hold all our stacked Base64 iframe charts
                 ui.output_ui("stacked_charts_ui")
             ),
             ui.nav_panel("Site As-Builts",
@@ -143,11 +153,8 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
                 opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
             )
             
-            if not fig: continue
-            
-            # 💡 THE BYPASS: Create an isolated Iframe document for the chart
-            chart_html = fig.to_html(full_html=True, include_plotlyjs='cdn')
-            chart_iframe = ui.tags.iframe(srcdoc=chart_html, style="width: 100%; height: 750px; border: none;")
+            chart_iframe = create_plotly_b64_iframe(fig)
+            if not chart_iframe: continue
             
             # Check Map Data
             loc_clean = str(loc).strip().upper()
@@ -161,9 +168,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             if has_map and show_map_opt:
                 as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
                 map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
-                if map_fig:
-                    map_html = map_fig.to_html(full_html=True, include_plotlyjs='cdn')
-                    map_iframe = ui.tags.iframe(srcdoc=map_html, style="width: 100%; height: 750px; border: none;")
+                map_iframe = create_plotly_b64_iframe(map_fig)
 
             # Assemble Card Layout
             if map_iframe:
