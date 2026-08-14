@@ -61,7 +61,7 @@ def time_vs_temp_ui():
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
-                ui.input_selectize("selected_systems", "⚙️ Filter by System:", choices=[], multiple=True),
+                ui.output_ui("system_filter_ui"), # Reverted to the working dynamic UI
                 ui.output_ui("dynamic_css_injector"),
                 ui.hr(),
                 # Inject the 15 pre-built stacked slots
@@ -99,20 +99,23 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         raw_data = get_universal_portal_data(proj, lookback_days=days, is_summary_page=False, show_masked=show_m, show_baddata=show_b)
         return apply_sanity_filter(raw_data)
 
-    # Automatically populate the System filter dropdown
-    @reactive.Effect
-    def update_system_filter():
+    # Reverted back to the dynamic UI renderer that successfully populated for you
+    @output
+    @render.ui
+    def system_filter_ui():
         df = get_raw_data()
-        if not df.empty:
-            avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
-            ui.update_selectize("selected_systems", choices=avail_sys)
+        if df.empty: return ui.HTML("")
+        avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        if len(avail_sys) > 1:
+            return ui.input_selectize("selected_systems", "⚙️ Filter by System:", choices=avail_sys, multiple=True)
+        return ui.HTML("")
 
     @reactive.Calc
     def shared_chart_data():
         df = get_raw_data()
         if df.empty: return pd.DataFrame(), pd.DataFrame(), []
         
-        # Safely read the dropdown filter
+        # Safely read the dropdown filter without crashing the graph
         sys_filter = []
         try:
             sys_filter = input.selected_systems()
