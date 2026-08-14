@@ -1,5 +1,4 @@
 from shiny import ui, render, reactive, module
-from shinywidgets import output_widget, render_plotly
 import pandas as pd
 import os
 import re
@@ -29,38 +28,23 @@ def get_image_base64(img_path):
 @module.ui
 def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
-    
-    # FIX: Manually resolve the module namespace for 3rd-party widgets
-    chart_id = module.resolve_id("main_trend_chart")
-    map_id = module.resolve_id("main_map_chart")
-    
     return ui.div(
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
                 ui.layout_columns(
-                    ui.output_ui("system_filter_ui"),
-                    ui.output_ui("location_selector_ui")
+                    ui.output_ui("system_filter_ui")
                 ),
                 ui.hr(),
-                
-                # Static Flexbox with properly namespaced IDs
-                ui.card(
-                    ui.div(
-                        ui.div(output_widget(chart_id, width="100%", height="750px"), style="flex-grow: 1; min-width: 0;"),
-                        ui.div(output_widget(map_id, width="100%", height="750px"), id="time_temp_map_wrapper", style="width: 25%; min-width: 300px; display: none;"),
-                        style="display: flex; gap: 15px; width: 100%;"
-                    ),
-                    style="box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
-                ),
-                
-                ui.output_ui("layout_css_injector")
+                # This will hold all our stacked HTML charts
+                ui.output_ui("stacked_charts_ui")
             ),
             ui.nav_panel("Site As-Builts",
                 ui.output_ui("as_builts_ui")
             )
         )
     )
+
 # =============================================================================
 # SHINY SERVER MODULE
 # =============================================================================
@@ -99,11 +83,11 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         df = get_clean_data()
         if df.empty: return None, None, []
         
-        # Safely fetch system filter using AttributeError to maintain reactive tracking
         sys_filter = []
         try:
-            sys_filter = input.selected_systems()
-        except AttributeError:
+            if hasattr(input, 'selected_systems'):
+                sys_filter = input.selected_systems()
+        except Exception:
             pass
             
         if sys_filter:
@@ -114,58 +98,26 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         
         return df, map_df, valid_locations
 
-    @reactive.Calc
-    def shared_chart_data():
-        df = get_clean_data()
-        if df.empty: return None, None, []
-        
-        # FIX: Reverted to natural hasattr tracking so reactivity isn't blocked
-        sys_filter = input.selected_systems() if hasattr(input, 'selected_systems') else []
-            
-        if sys_filter:
-            df = df[df['System'].astype(str).isin(sys_filter)]
-            
-        map_df = get_map_coords()
-        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
-        
-        return df, map_df, valid_locations
-
-    # --- 2. DYNAMIC LAYOUT ROUTER (CSS INJECTION) ---
+    # --- 1. UI RENDERING (DROPDOWNS) ---
     @output
     @render.ui
-    def layout_css_injector():
-        """Dynamically shows or hides the map container via CSS without destroying the widget."""
-        target_loc = input.target_location() if hasattr(input, 'target_location') else None
-        if not target_loc: return ui.HTML("")
+    def system_filter_ui():
+        df = get_clean_data()
+        if df.empty: return ui.HTML("")
+        avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        if len(avail_sys) > 1:
+            return ui.input_selectize("selected_systems", "⚙️ Filter by System:", avail_sys, multiple=True)
+        return ui.HTML("")
 
-        _, map_df, _ = shared_chart_data()
-        show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
-        
-        loc_clean = str(target_loc).strip().upper()
-        
-        has_map = False
-        if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
-            if loc_clean in map_df['Location'].values:
-                has_map = True
+    # --- 2. HTML RENDERER (STACKED CHARTS) ---
+    @output
+    @render.ui
+    def stacked_charts_ui():
+        df, map_df, valid_locations = shared_chart_data()
+        if not valid_locations: 
+            return ui.p("Processing data...", class_="text-muted")
 
-        if has_map and show_map_opt:
-            return ui.HTML("<style>#time_temp_map_wrapper { display: block !important; }</style>")
-        else:
-            return ui.HTML("<style>#time_temp_map_wrapper { display: none !important; }</style>")
-
-    # --- 3. NATIVE PLOTLY RENDERERS ---
-    @output(id="main_trend_chart")
-    @render_plotly
-    def _plot():
-        target_loc = input.target_location() if hasattr(input, 'target_location') else None
-        if not target_loc: return None
-
-        df, _, _ = shared_chart_data()
-        if df is None or df.empty: return None
-
-        loc_data = df[df['Location'] == target_loc]
-        if loc_data.empty: return None
-
+        # Resolve context variables once for all charts
         u_mode = unit_mode() if callable(unit_mode) else unit_mode
         u_lbl = unit_label() if callable(unit_label) else unit_label
         tz = display_tz() if callable(display_tz) else display_tz
@@ -173,9 +125,9 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         days = lookback_days() if callable(lookback_days) else lookback_days
         show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
         proj = selected_project() if callable(selected_project) else selected_project
-        
         show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
         show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
+        show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
         
         end_date = pd.Timestamp.now()
         start_date = end_date - pd.Timedelta(days=days)
@@ -187,38 +139,65 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         parsed_date = pd.to_datetime(real_f_date, errors='coerce')
         if pd.notnull(parsed_date):
             freeze_start_ts = parsed_date.tz_localize(None) if parsed_date.tzinfo else parsed_date
-        
-        fig = build_high_speed_graph(
-            client=client, df=loc_data, title=f"Thermal Trends: {target_loc}",
-            start_view=start_date, end_view=end_date, active_refs=refs,
-            unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
-            f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
-            opt_show_masked=show_m, 
-            opt_show_baddata=show_b,
-            opt_project_name=proj
-        )
-        return fig
-        
-    @output(id="main_map_chart")
-    @render_plotly
-    def _map():
-        target_loc = input.target_location() if hasattr(input, 'target_location') else None
-        if not target_loc: return None
 
-        _, map_df, _ = shared_chart_data()
-        if map_df.empty: return None
+        chart_blocks = []
 
-        loc_clean = str(target_loc).strip().upper()
-        if not loc_clean.startswith('T'): return None
+        # Loop through every location and stack them just like Streamlit
+        for loc in valid_locations:
+            loc_data = df[df['Location'] == loc]
+            if loc_data.empty: continue
+            
+            # Generate Plotly Figure
+            fig = build_high_speed_graph(
+                client=client, df=loc_data, title=f"Thermal Trends: {loc}",
+                start_view=start_date, end_view=end_date, active_refs=refs,
+                unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
+                f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
+                opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
+            )
+            
+            if not fig: continue
+            
+            # BYPASS: Convert the Plotly figure directly into raw HTML with its own JS bundle
+            chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+            
+            # Check Map Data
+            loc_clean = str(loc).strip().upper()
+            has_map = False
+            map_html = ""
+            if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
+                if loc_clean in map_df['Location'].values:
+                    has_map = True
+                    
+            if has_map and show_map_opt:
+                job_num = proj.split('-')[0].strip()
+                as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
+                map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
+                if map_fig:
+                    map_html = map_fig.to_html(full_html=False, include_plotlyjs='cdn')
 
-        proj = selected_project() if callable(selected_project) else selected_project
-        job_num = proj.split('-')[0].strip()
-        as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
-        
-        map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
-        return map_fig
+            # Build UI Card for this location
+            if map_html:
+                card = ui.card(
+                    ui.layout_columns(
+                        ui.div(ui.HTML(chart_html)),
+                        ui.div(ui.HTML(map_html)),
+                        col_widths=[9, 3]
+                    ),
+                    style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 30px;"
+                )
+            else:
+                card = ui.card(
+                    ui.div(ui.HTML(chart_html)),
+                    style="box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 30px;"
+                )
+                
+            chart_blocks.append(card)
 
-    # --- 4. AS-BUILTS ENGINE ---
+        # Return all 10+ stacked graphs
+        return ui.div(*chart_blocks)
+
+    # --- 3. AS-BUILTS ENGINE ---
     @output
     @render.ui
     def as_builts_ui():
