@@ -20,3 +20,4 @@ matplotlib
 Pillow
 streamlit>=1.30.0
 streamlit-image-coordinates
+kaleido==0.2.1
