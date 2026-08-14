@@ -24,6 +24,13 @@ def get_image_base64(img_path):
     if ext == 'jpg': ext = 'jpeg'
     return f"data:image/{ext};base64,{encoded_string}"
 
+def empty_fig(msg="Waiting for data..."):
+    """Generates a clear message instead of mysterious empty axes."""
+    fig = go.Figure()
+    fig.add_annotation(text=msg, xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="gray"))
+    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), plot_bgcolor="white")
+    return fig
+
 # =============================================================================
 # SHINY UI MODULE
 # =============================================================================
@@ -101,9 +108,9 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         df = get_clean_data()
         if df.empty: return None, None, []
         
-        # Reactive-safe input checking
+        # FIX: Safe Reactive Input Checking using hasattr
         sys_filter = []
-        if "selected_systems" in input:
+        if hasattr(input, "selected_systems"):
             sys_filter = input.selected_systems()
             
         if sys_filter:
@@ -136,7 +143,7 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
     @render.ui
     def layout_css_injector():
         """Dynamically shows or hides the map container based on data."""
-        if "target_location" not in input: return ui.HTML("")
+        if not hasattr(input, "target_location"): return ui.HTML("")
         target_loc = input.target_location()
         if not target_loc: return ui.HTML("")
 
@@ -160,15 +167,15 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
     @output(id="main_trend_chart")
     @render_plotly
     def _plot():
-        if "target_location" not in input: return go.Figure()
+        if not hasattr(input, "target_location"): return empty_fig("Waiting for location selection...")
         target_loc = input.target_location()
-        if not target_loc: return go.Figure()
+        if not target_loc: return empty_fig("Waiting for location selection...")
 
         df, _, _ = shared_chart_data()
-        if df is None or df.empty: return go.Figure()
+        if df is None or df.empty: return empty_fig("No data available for this project.")
 
         loc_data = df[df['Location'] == target_loc]
-        if loc_data.empty: return go.Figure()
+        if loc_data.empty: return empty_fig(f"No data available for location: {target_loc}")
 
         u_mode = unit_mode() if callable(unit_mode) else unit_mode
         u_lbl = unit_label() if callable(unit_label) else unit_label
@@ -199,12 +206,12 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
             opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
         )
-        return fig if fig else go.Figure()
+        return fig if fig else empty_fig("Graph rendering failed.")
 
     @output(id="main_map_chart")
     @render_plotly
     def _map():
-        if "target_location" not in input: return go.Figure()
+        if not hasattr(input, "target_location"): return go.Figure()
         target_loc = input.target_location()
         if not target_loc: return go.Figure()
 
