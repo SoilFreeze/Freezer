@@ -38,7 +38,6 @@ def empty_fig(msg="Waiting for data..."):
 def time_vs_temp_ui():
     """Defines the visual layout for the Time vs Temp charts."""
     
-    # Manually resolve IDs so our CSS injector can safely target the map wrapper
     chart_id = module.resolve_id("main_trend_chart")
     map_id = module.resolve_id("main_map_chart")
     wrapper_id = module.resolve_id("map_wrapper")
@@ -47,14 +46,17 @@ def time_vs_temp_ui():
         ui.h2("📈 Time vs Temperature Tracking"),
         ui.navset_card_tab(
             ui.nav_panel("Telemetry Charts",
+                
+                # FIX: Static inputs guarantee no SilentExceptions on load.
                 ui.layout_columns(
-                    ui.output_ui("system_filter_ui"),
-                    ui.output_ui("location_selector_ui")
+                    ui.input_selectize("selected_systems", "⚙️ Filter by System:", choices=[], multiple=True),
+                    ui.input_select("target_location", "📍 Select Location to Inspect:", choices=["Loading Data..."])
                 ),
+                
                 ui.hr(),
                 ui.output_ui("layout_css_injector"),
                 
-                # STATIC WIDGET PLACEMENT (Fixes the "flat line" bug)
+                # STATIC WIDGET PLACEMENT
                 ui.card(
                     ui.div(
                         ui.div(output_widget(chart_id, width="100%", height="750px"), style="flex-grow: 1; min-width: 0;"),
@@ -92,68 +94,69 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         raw_data = get_universal_portal_data(proj, lookback_days=days, is_summary_page=False, show_masked=show_m, show_baddata=show_b)
         return apply_sanity_filter(raw_data)
 
-    @reactive.Calc
-    def get_map_coords():
-        proj = selected_project() if callable(selected_project) else selected_project
-        if not proj or proj == "All Projects" or client is None: return pd.DataFrame()
-        job_num = proj.split('-')[0].strip()
-        try:
-            map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
-            return client.query(map_query).to_dataframe()
-        except:
-            return pd.DataFrame()
+    # --- REACTIVE DROPDOWN UPDATER ---
+    @reactive.Effect
+    def update_dropdowns():
+        """Reactively populates the dropdowns without destroying their DOM elements."""
+        df = get_clean_data()
+        if df.empty:
+            ui.update_select("target_location", choices=["No Data"])
+            ui.update_selectize("selected_systems", choices=[])
+            return
+
+        # 1. Update System Choices
+        avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
+        ui.update_selectize("selected_systems", choices=avail_sys)
+
+        # 2. Update Location Choices (Respecting current system filter)
+        sys_filter = input.selected_systems()
+        if sys_filter:
+            df = df[df['System'].astype(str).isin(sys_filter)]
+
+        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
+
+        if valid_locations:
+            ui.update_select("target_location", choices=valid_locations)
+        else:
+            ui.update_select("target_location", choices=["No Locations Found"])
 
     @reactive.Calc
     def shared_chart_data():
         df = get_clean_data()
-        if df.empty: return None, None, []
+        if df.empty: return None, pd.DataFrame()
         
-        # FIX: Safe Reactive Input Checking using hasattr
-        sys_filter = []
-        if hasattr(input, "selected_systems"):
-            sys_filter = input.selected_systems()
-            
+        sys_filter = input.selected_systems()
         if sys_filter:
             df = df[df['System'].astype(str).isin(sys_filter)]
             
-        map_df = get_map_coords()
-        valid_locations = sorted([loc for loc in df['Location'].dropna().unique() if str(loc).strip().upper() != 'UNASSIGNED'], key=natural_sort_key)
-        
-        return df, map_df, valid_locations
+        # Safely fetch map coordinates
+        map_df = pd.DataFrame()
+        proj = selected_project() if callable(selected_project) else selected_project
+        if proj and proj != "All Projects" and client:
+            job_num = proj.split('-')[0].strip()
+            try:
+                map_query = f"SELECT Project, Location, Map_X, Map_Y, Image_Name FROM `{PROJECT_ID}.{DATASET_ID}.TempPipeLoc` WHERE CAST(Project AS STRING) = '{job_num}'"
+                map_df = client.query(map_query).to_dataframe()
+            except Exception:
+                pass
+                
+        return df, map_df
 
-    # --- 1. UI RENDERING (DROPDOWNS) ---
-    @output
-    @render.ui
-    def system_filter_ui():
-        df = get_clean_data()
-        if df.empty: return ui.HTML("")
-        avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
-        if len(avail_sys) > 1:
-            return ui.input_selectize("selected_systems", "⚙️ Filter by System:", avail_sys, multiple=True)
-        return ui.HTML("")
-
-    @output
-    @render.ui
-    def location_selector_ui():
-        _, _, valid_locations = shared_chart_data()
-        if not valid_locations: return ui.HTML("")
-        return ui.input_select("target_location", "📍 Select Location to Inspect:", valid_locations)
-
+    # --- LAYOUT CONTROLS ---
     @output
     @render.ui
     def layout_css_injector():
-        """Dynamically shows or hides the map container based on data."""
-        if not hasattr(input, "target_location"): return ui.HTML("")
         target_loc = input.target_location()
-        if not target_loc: return ui.HTML("")
+        if not target_loc or target_loc in ["Loading Data...", "No Data", "No Locations Found"]: 
+            return ui.HTML("")
 
-        _, map_df, _ = shared_chart_data()
+        _, map_df = shared_chart_data()
         show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
         
         loc_clean = str(target_loc).strip().upper()
         
         has_map = False
-        if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
+        if loc_clean.startswith('T') and map_df is not None and not map_df.empty and 'Location' in map_df.columns:
             if loc_clean in map_df['Location'].values:
                 has_map = True
 
@@ -163,19 +166,21 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         else:
             return ui.HTML(f"<style>#{wrapper_id} {{ display: none !important; }}</style>")
 
-    # --- 2. NATIVE PLOTLY RENDERERS ---
+    # --- NATIVE PLOTLY RENDERERS ---
     @output(id="main_trend_chart")
     @render_plotly
     def _plot():
-        if not hasattr(input, "target_location"): return empty_fig("Waiting for location selection...")
         target_loc = input.target_location()
-        if not target_loc: return empty_fig("Waiting for location selection...")
+        if not target_loc or target_loc in ["Loading Data...", "No Data", "No Locations Found"]: 
+            return empty_fig("Waiting for valid location selection...")
 
-        df, _, _ = shared_chart_data()
-        if df is None or df.empty: return empty_fig("No data available for this project.")
+        df, _ = shared_chart_data()
+        if df is None or df.empty: 
+            return empty_fig("No data available for this project.")
 
         loc_data = df[df['Location'] == target_loc]
-        if loc_data.empty: return empty_fig(f"No data available for location: {target_loc}")
+        if loc_data.empty: 
+            return empty_fig(f"No valid sensor data for {target_loc}")
 
         u_mode = unit_mode() if callable(unit_mode) else unit_mode
         u_lbl = unit_label() if callable(unit_label) else unit_label
@@ -206,23 +211,23 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
             opt_show_masked=show_m, opt_show_baddata=show_b, opt_project_name=proj
         )
-        return fig if fig else empty_fig("Graph rendering failed.")
+        return fig if fig else empty_fig("Graph rendering failed internally.")
 
     @output(id="main_map_chart")
     @render_plotly
     def _map():
-        if not hasattr(input, "target_location"): return go.Figure()
         target_loc = input.target_location()
-        if not target_loc: return go.Figure()
+        if not target_loc or target_loc in ["Loading Data...", "No Data", "No Locations Found"]: 
+            return go.Figure()
 
-        _, map_df, _ = shared_chart_data()
-        if map_df.empty: return go.Figure()
+        _, map_df = shared_chart_data()
+        if map_df is None or map_df.empty: return go.Figure()
 
         loc_clean = str(target_loc).strip().upper()
         if not loc_clean.startswith('T'): return go.Figure()
 
         proj = selected_project() if callable(selected_project) else selected_project
-        job_num = proj.split('-')[0].strip()
+        job_num = proj.split('-')[0].strip() if proj else ""
         as_built_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "as_builts"))
         
         map_fig = build_cropped_site_map(job_num, loc_clean, map_df, as_built_path)
