@@ -96,7 +96,13 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         df = get_clean_data()
         if df.empty: return None, None, []
         
-        sys_filter = input.selected_systems() if hasattr(input, 'selected_systems') else []
+        # Safely fetch system filter using AttributeError to maintain reactive tracking
+        sys_filter = []
+        try:
+            sys_filter = input.selected_systems()
+        except AttributeError:
+            pass
+            
         if sys_filter:
             df = df[df['System'].astype(str).isin(sys_filter)]
             
@@ -105,68 +111,42 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         
         return df, map_df, valid_locations
 
-    # --- 1. UI RENDERING (DROPDOWNS) ---
+    # --- 2. DYNAMIC LAYOUT ROUTER (CSS INJECTION) ---
     @output
     @render.ui
-    def system_filter_ui():
-        df = get_clean_data()
-        if df.empty: return ui.HTML("")
-        avail_sys = sorted([str(s) for s in df['System'].dropna().unique() if str(s).strip().upper() not in ['NAN', 'NONE', '']], key=natural_sort_key)
-        if len(avail_sys) > 1:
-            return ui.input_selectize("selected_systems", "⚙️ Filter by System:", avail_sys, multiple=True)
-        return ui.HTML("")
-
-    @output
-    @render.ui
-    def location_selector_ui():
-        _, _, valid_locations = shared_chart_data()
-        if not valid_locations: return ui.HTML("")
-        # The user picks exactly one location to view at a time
-        return ui.input_select("target_location", "📍 Select Location to Inspect:", valid_locations)
-
-    # --- 2. DYNAMIC LAYOUT ROUTER ---
-    @output
-    @render.ui
-    def dynamic_chart_layout():
-        target_loc = input.target_location() if hasattr(input, 'target_location') else None
-        if not target_loc: return ui.p("Waiting for location selection...", class_="text-muted")
+    def layout_css_injector():
+        """Dynamically shows or hides the map container via CSS without destroying the widget."""
+        try:
+            target_loc = input.target_location()
+        except AttributeError:
+            return ui.HTML("")
+            
+        if not target_loc: return ui.HTML("")
 
         _, map_df, _ = shared_chart_data()
         show_map_opt = global_show_map() if callable(global_show_map) else global_show_map
         
         loc_clean = str(target_loc).strip().upper()
-        is_temp_pipe = loc_clean.startswith('T')
         
         has_map = False
-        if is_temp_pipe and not map_df.empty and 'Location' in map_df.columns:
+        if loc_clean.startswith('T') and not map_df.empty and 'Location' in map_df.columns:
             if loc_clean in map_df['Location'].values:
                 has_map = True
 
-        # Because we are injecting output_widget inside a render.ui block inside a module, 
-        # we MUST explicitly attach the session.ns() namespace to the IDs.
-        chart_id = session.ns("main_trend_chart")
-        map_id = session.ns("main_map_chart")
-
         if has_map and show_map_opt:
-            return ui.card(
-                ui.layout_columns(
-                    ui.div(output_widget(chart_id, height="750px")),
-                    ui.div(output_widget(map_id, height="750px")),
-                    col_widths=[9, 3]
-                ),
-                style="box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
-            )
+            return ui.HTML("<style>#time_temp_map_wrapper { display: block !important; }</style>")
         else:
-            return ui.card(
-                output_widget(chart_id, width="100%", height="750px"),
-                style="box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
-            )
+            return ui.HTML("<style>#time_temp_map_wrapper { display: none !important; }</style>")
 
     # --- 3. NATIVE PLOTLY RENDERERS ---
     @output(id="main_trend_chart")
     @render_plotly
     def _plot():
-        target_loc = input.target_location() if hasattr(input, 'target_location') else None
+        try:
+            target_loc = input.target_location()
+        except AttributeError:
+            return None
+            
         if not target_loc: return None
 
         df, _, _ = shared_chart_data()
@@ -184,7 +164,6 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
         show_elev_opt = global_show_elevation() if callable(global_show_elevation) else global_show_elevation
         proj = selected_project() if callable(selected_project) else selected_project
         
-        # Resolve visual toggles
         show_m = global_show_masked() if callable(global_show_masked) else global_show_masked
         show_b = global_show_baddata() if callable(global_show_baddata) else global_show_baddata
         
@@ -204,12 +183,12 @@ def time_vs_temp_server(input, output, session, client, selected_project, lookba
             start_view=start_date, end_view=end_date, active_refs=refs,
             unit_mode=u_mode, unit_label=u_lbl, display_tz=tz,
             f_start_date=freeze_start_ts, curve_id=proj, show_elevation=show_elev_opt,
-            # FIX: Explicitly pass Shiny states to override the Streamlit-centric get_ui_state fallbacks
             opt_show_masked=show_m, 
             opt_show_baddata=show_b,
             opt_project_name=proj
         )
         return fig
+        
     @output(id="main_map_chart")
     @render_plotly
     def _map():
